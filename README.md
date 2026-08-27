@@ -1,6 +1,6 @@
 # BioLang Studio
 
-Live application: <https://oriclabs.github.io/biolang-studio/>
+Live application: <https://oriclabs.com/biolang-studio/>
 
 BioLang Studio is a focused notebook application for learning and reproducible analysis. It runs ordinary BioLang in a browser Worker, can use a native desktop bridge for large local files, and can submit advanced work to the existing SOMER v1 API.
 
