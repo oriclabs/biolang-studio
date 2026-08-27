@@ -1,0 +1,37 @@
+name: Validate
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out Studio
+        uses: actions/checkout@v4
+        with:
+          path: biolang-studio
+      - name: Check out BioLang runtime
+        uses: actions/checkout@v4
+        with:
+          repository: oriclabs/biolang
+          path: biolang
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: biolang-studio/package-lock.json
+      - name: Install
+        working-directory: biolang-studio
+        run: npm ci
+      - name: Validate
+        working-directory: biolang-studio
+        run: |
+          npm test
+          npm run check:content
+          npm run build

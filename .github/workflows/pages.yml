@@ -1,0 +1,53 @@
+name: Deploy Studio
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out Studio
+        uses: actions/checkout@v4
+        with:
+          path: biolang-studio
+      - name: Check out BioLang runtime
+        uses: actions/checkout@v4
+        with:
+          repository: oriclabs/biolang
+          path: biolang
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: biolang-studio/package-lock.json
+      - uses: actions/configure-pages@v5
+      - name: Build
+        working-directory: biolang-studio
+        run: |
+          npm ci
+          npm run build
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: biolang-studio/dist
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4

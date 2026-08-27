@@ -1,0 +1,34 @@
+{
+  "name": "biolang-studio",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "sync:runtime": "node scripts/sync-runtime.mjs",
+    "prebuild": "npm run sync:runtime",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "test": "vitest run --exclude tests/e2e/**",
+    "test:e2e": "playwright test",
+    "check:content": "node scripts/check-content.mjs"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^6.0.7",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.1",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "@types/node": "^22.15.3",
+    "typescript": "~5.7.2",
+    "vitest": "^3.2.4",
+    "jsdom": "^26.1.0"
+  }
+}

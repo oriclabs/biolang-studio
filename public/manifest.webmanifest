@@ -1,0 +1,14 @@
+{
+  "name": "BioLang Studio",
+  "short_name": "BL Studio",
+  "description": "Run BioLang lessons and notebooks locally in a browser or desktop client.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#071019",
+  "theme_color": "#071019",
+  "icons": [
+    { "src": "./studio-mark.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
+
