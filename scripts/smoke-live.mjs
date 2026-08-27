@@ -27,8 +27,7 @@ try {
   await page.locator(".status-ready").waitFor({ timeout: 60_000 });
   await page.getByRole("button", { name: `Install ${lessonTitle}` }).waitFor({ timeout: 30_000 });
   await page.getByRole("button", { name: `Install ${lessonTitle}` }).click();
-  await page.locator('input[aria-label="Notebook name"]').waitFor({ state: "visible" });
-  if (await page.locator('input[aria-label="Notebook name"]').inputValue() !== "bdsr-essential-statistics.bln") throw new Error("Published lesson notebook did not load.");
+  await page.waitForFunction(() => document.querySelector('input[aria-label="Notebook name"]')?.value === "bdsr-essential-statistics.bln", undefined, { timeout: 30_000 });
   await page.getByText("Stephen D. Turner", { exact: false }).first().waitFor();
 
   const datasetCount = await page.getByRole("button", { name: "Prepare" }).count();
