@@ -36,6 +36,8 @@ npm run build
 npm run test:e2e
 ```
 
+After a public deployment, `npm run test:live` verifies the published registry and manifest checksum, installs the real BDSR lesson, prepares its two source-hosted datasets, runs every cell and BioLang plot in browser WASM, and removes the lesson again. It is intentionally opt-in rather than part of pull-request CI because it depends on external hosts.
+
 ## Content policy
 
 Studio ships no subject-specific lessons. It discovers metadata from the separate `biolang-registry`, or accepts a custom HTTPS manifest URL, and can remove a lesson together with its cached declared datasets. Discovery does not install a lesson or download data. Registry installation verifies the exact manifest bytes against the registry SHA-256 before parsing them. The content repository—not Studio—owns that lesson's examples, reference results, citations, and validation tests.

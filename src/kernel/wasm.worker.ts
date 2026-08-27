@@ -26,9 +26,9 @@ let runtime: WasmModule | null = null;
 
 async function loadRuntime() {
   if (runtime) return runtime;
-  const runtimeUrl = "/runtime/bl_wasm.js";
+  const runtimeUrl = new URL("../runtime/bl_wasm.js", self.location.href).href;
   const module = await import(/* @vite-ignore */ runtimeUrl) as WasmModule;
-  await module.default(new URL("/runtime/bl_wasm_bg.wasm", self.location.href));
+  await module.default(new URL("../runtime/bl_wasm_bg.wasm", self.location.href));
   module.init();
   runtime = module;
   return module;

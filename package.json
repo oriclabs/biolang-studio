@@ -12,6 +12,7 @@
     "preview": "vite preview --host 127.0.0.1",
     "test": "vitest run --exclude tests/e2e/**",
     "test:e2e": "playwright test",
+    "test:live": "node scripts/smoke-live.mjs",
     "check:content": "node scripts/check-content.mjs"
   },
   "dependencies": {
