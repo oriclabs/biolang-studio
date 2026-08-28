@@ -1,4 +1,4 @@
-import type { AttachedFile, ExecutionResult, WorkerRequest, WorkerResponse } from "./protocol";
+import type { AttachedFile, ExecutionResult, VariableExportFormat, WorkerRequest, WorkerResponse } from "./protocol";
 
 type WasmModule = {
   default: (input?: unknown) => Promise<unknown>;
@@ -6,6 +6,8 @@ type WasmModule = {
   evaluate: (source: string) => string;
   reset: () => void;
   list_variables: () => string;
+  inspect_variable: (name: string, offset: number, limit: number) => string;
+  export_variable: (name: string, format: VariableExportFormat, maximumBytes: number) => Uint8Array;
 };
 
 const files = new Map<string, string>();
@@ -46,7 +48,7 @@ async function handle(request: WorkerRequest): Promise<unknown> {
     case "initialize":
       return {
         kind: "browser", persistent: true, localFiles: true, largeFiles: false,
-        remote: false, cancel: true,
+        remote: false, cancel: true, variableInspection: true, variableRemoval: false, variableExport: "capped",
         description: "BioLang WebAssembly in a dedicated browser worker"
       };
     case "execute": {
@@ -71,12 +73,30 @@ async function handle(request: WorkerRequest): Promise<unknown> {
       return null;
     case "listVariables":
       return JSON.parse(wasm.list_variables());
+    case "inspectVariable": {
+      const envelope = JSON.parse(wasm.inspect_variable(request.name, request.offset, request.limit)) as { ok: boolean; page?: unknown; error?: string };
+      if (!envelope.ok || !envelope.page) throw new Error(envelope.error || `Cannot inspect ${request.name}.`);
+      return envelope.page;
+    }
+    case "exportVariable": {
+      const bytes = wasm.export_variable(request.name, request.format, request.maximumBytes);
+      const mediaTypes = { json: "application/json", csv: "text/csv", tsv: "text/tab-separated-values", text: "text/plain" } as const;
+      return { filename: `${request.name}.${request.format === "text" ? "txt" : request.format}`, mediaType: mediaTypes[request.format], bytes };
+    }
   }
 }
 
 self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
   let response: WorkerResponse;
-  try { response = { id: event.data.id, ok: true, value: await handle(event.data) }; }
+  const transfer: Transferable[] = [];
+  try {
+    const value = await handle(event.data);
+    response = { id: event.data.id, ok: true, value };
+    if (event.data.method === "exportVariable" && value && typeof value === "object" && "bytes" in value) {
+      const bytes = (value as { bytes: Uint8Array }).bytes;
+      transfer.push(bytes.buffer);
+    }
+  }
   catch (error) { response = { id: event.data.id, ok: false, error: error instanceof Error ? error.message : String(error) }; }
-  self.postMessage(response);
+  self.postMessage(response, transfer);
 };

@@ -1,4 +1,4 @@
-import type { AttachedFile, ExecutionResult, Kernel, KernelCapabilities, WorkerRequest, WorkerResponse } from "./protocol";
+import type { AttachedFile, ExecutionResult, Kernel, KernelCapabilities, VariableExport, VariableExportFormat, VariablePage, VariableSummary, WorkerRequest, WorkerResponse } from "./protocol";
 
 type WorkerCall =
   | { method: "initialize" }
@@ -6,13 +6,19 @@ type WorkerCall =
   | { method: "reset" }
   | { method: "clearFiles" }
   | { method: "attach"; file: AttachedFile }
-  | { method: "listVariables" };
+  | { method: "listVariables" }
+  | { method: "inspectVariable"; name: string; offset: number; limit: number }
+  | { method: "exportVariable"; name: string; format: VariableExportFormat; maximumBytes: number };
 
 export class WasmKernel implements Kernel {
   readonly capabilities: KernelCapabilities = {
     kind: "browser", persistent: true, localFiles: true, largeFiles: false,
-    remote: false, cancel: true, description: "BioLang WebAssembly in a dedicated browser worker"
+    remote: false, cancel: true, variableInspection: true, variableRemoval: false, variableExport: "capped",
+    description: "BioLang WebAssembly in a dedicated browser worker"
   };
+  runtimeInfo() {
+    return Promise.resolve({ runtime: "browser" as const, description: this.capabilities.description });
+  }
   private worker: Worker | null = null;
   private serial = 0;
   private pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
@@ -52,7 +58,18 @@ export class WasmKernel implements Kernel {
   reset() { return this.call<void>({ method: "reset" }); }
   async clearFiles() { this.attached.clear(); await this.call<void>({ method: "clearFiles" }); }
   async attach(file: AttachedFile) { this.attached.set(file.path, file); await this.call({ method: "attach", file }); }
-  listVariables() { return this.call<unknown[]>({ method: "listVariables" }); }
+  listVariables() { return this.call<VariableSummary[]>({ method: "listVariables" }); }
+  inspectVariable(name: string, offset: number, limit: number) {
+    return this.call<VariablePage>({ method: "inspectVariable", name, offset, limit });
+  }
+  exportVariable(name: string, format: VariableExportFormat, maximumBytes: number) {
+    return this.call<VariableExport>({ method: "exportVariable", name, format, maximumBytes });
+  }
+  async publishVariable(name: string, format: VariableExportFormat, path: string, maximumBytes: number) {
+    const exported = await this.exportVariable(name, format, maximumBytes);
+    if (!exported.bytes) throw new Error("The browser kernel returned no output bytes.");
+    return { path, size: exported.bytes.byteLength, sha256: "", mediaType: exported.mediaType, bytes: exported.bytes };
+  }
   async cancel() {
     this.worker?.terminate();
     this.worker = null;

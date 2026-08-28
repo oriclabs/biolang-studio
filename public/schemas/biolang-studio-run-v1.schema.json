@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lang.bio/schemas/studio-run-v1.json",
+  "title": "BioLang Studio run record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "schema", "kind", "generatedAt", "startedAt", "finishedAt", "success", "workspace", "notebook", "runtime", "inputs", "timing"],
+  "properties": {
+    "$schema": { "const": "https://lang.bio/schemas/studio-run-v1.json" },
+    "schema": { "const": 1 },
+    "kind": { "const": "biolang-studio-run" },
+    "generatedAt": { "type": "string", "format": "date-time" },
+    "startedAt": { "type": "string", "format": "date-time" },
+    "finishedAt": { "type": "string", "format": "date-time" },
+    "success": { "type": "boolean" },
+    "workspace": {
+      "type": "object", "additionalProperties": false, "required": ["name"],
+      "properties": { "name": { "type": "string", "minLength": 1 } }
+    },
+    "notebook": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "filename", "sourceSha256", "executedSourceSha256", "executedThrough", "codeCells"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "filename": { "type": "string", "minLength": 1 },
+        "sourceSha256": { "$ref": "#/$defs/sha256" },
+        "executedSourceSha256": { "$ref": "#/$defs/sha256" },
+        "executedThrough": { "type": "integer", "minimum": 0 },
+        "codeCells": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "runtime": {
+      "type": "object", "additionalProperties": false, "required": ["runtime", "description"],
+      "properties": {
+        "runtime": { "enum": ["browser", "desktop", "somer"] },
+        "description": { "type": "string" },
+        "biolangVersion": { "type": "string" },
+        "platform": { "type": "string" },
+        "architecture": { "type": "string" },
+        "endpoint": { "type": "string", "format": "uri" }
+      }
+    },
+    "inputs": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["path", "size", "sha256", "mediaType", "sourceKind"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1 },
+          "size": { "type": "integer", "minimum": 0 },
+          "sha256": { "$ref": "#/$defs/sha256" },
+          "mediaType": { "type": "string", "minLength": 1 },
+          "sourceKind": { "enum": ["local", "dataset", "url", "output"] }
+        }
+      }
+    },
+    "timing": {
+      "type": "object", "additionalProperties": false, "required": ["elapsedMs"],
+      "properties": { "elapsedMs": { "type": "integer", "minimum": 0 } }
+    },
+    "error": { "type": "string" }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}

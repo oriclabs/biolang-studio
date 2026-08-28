@@ -6,6 +6,12 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const catalogRoot = path.join(root, "public", "catalog");
 const catalog = JSON.parse(readFileSync(path.join(catalogRoot, "index.json"), "utf8"));
 const failures = [];
+for (const version of [1, 2, 3]) {
+  const workspaceSchema = JSON.parse(readFileSync(path.join(root, "public", "schemas", `biolang-workspace-v${version}.schema.json`), "utf8"));
+  if (workspaceSchema.$id !== `https://oriclabs.com/biolang-studio/schemas/biolang-workspace-v${version}.schema.json` || workspaceSchema.properties?.schema?.const !== version || !workspaceSchema.required?.includes("attachments")) failures.push(`workspace schema identity or required fields differ from runtime v${version}`);
+}
+const runSchema = JSON.parse(readFileSync(path.join(root, "public", "schemas", "biolang-studio-run-v1.schema.json"), "utf8"));
+if (runSchema.$id !== "https://lang.bio/schemas/studio-run-v1.json" || runSchema.properties?.schema?.const !== 1 || !runSchema.required?.includes("runtime") || !runSchema.required?.includes("inputs")) failures.push("run-record schema identity or required fields differ from runtime v1");
 for (const entry of catalog) {
   const relative = entry.manifest.replace(/^\.\/catalog\//, "");
   const manifestPath = path.join(catalogRoot, relative);
@@ -23,4 +29,4 @@ for (const entry of catalog) {
 }
 for (const item of readdirSync(catalogRoot)) if (item !== "index.json" && !catalog.some(entry => entry.manifest.includes(`/${item}/`))) failures.push(`orphan catalog directory: ${item}`);
 if (failures.length) { console.error(failures.join("\n")); process.exit(1); }
-console.log(`${catalog.length} lesson manifest checked; remote datasets are references only.`);
+console.log(`${catalog.length} lesson manifest, all workspace schemas, and the run-record schema checked; remote datasets are references only.`);

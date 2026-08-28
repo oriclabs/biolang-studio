@@ -1,0 +1,74 @@
+.external-change {
+  max-width: 980px;
+  margin: 10px auto 0;
+  padding: 10px 12px;
+  border: 1px solid #d5a642;
+  border-radius: 8px;
+  background: #fff4d8;
+  color: #624b18;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.external-change div {
+  flex: 1;
+  min-width: 0;
+}
+
+.external-change strong,
+.external-change span {
+  display: block;
+}
+
+.external-change span {
+  margin-top: 2px;
+  font-size: 12px;
+}
+
+.external-change button {
+  border: 1px solid #c39430;
+  border-radius: 6px;
+  background: #fff;
+  color: #604812;
+  padding: 6px 9px;
+}
+
+.recent-native {
+  margin-top: 6px;
+  padding-top: 7px;
+  border-top: 1px solid #d9e1dd;
+}
+
+.recent-native small {
+  display: block;
+  padding: 3px 8px 5px;
+  color: #6c7975;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+}
+
+.recent-native button {
+  display: flex !important;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  max-width: 310px;
+  text-align: left;
+}
+
+.recent-native button span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.recent-native button em {
+  color: #71807c;
+  font-size: 10px;
+  font-style: normal;
+}
+
+@media (max-width: 700px) {
+  .external-change { align-items: stretch; flex-direction: column; }
+}

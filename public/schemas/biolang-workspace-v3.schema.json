@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://oriclabs.com/biolang-studio/schemas/biolang-workspace-v3.schema.json",
+  "title": "BioLang Studio workspace",
+  "description": "Portable notebook text and checksum-pinned input/output references. Raw attachment bytes and interpreter variables are never embedded.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "kind", "name", "activeNotebookId", "notebooks", "attachments"],
+  "properties": {
+    "$schema": { "const": "https://oriclabs.com/biolang-studio/schemas/biolang-workspace-v3.schema.json" },
+    "schema": { "const": 3 },
+    "kind": { "const": "biolang-workspace" },
+    "name": { "type": "string", "minLength": 1 },
+    "activeNotebookId": { "type": "string", "minLength": 1 },
+    "notebooks": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/notebook" } },
+    "attachments": { "type": "array", "items": { "$ref": "#/$defs/attachment" } }
+  },
+  "$defs": {
+    "safePath": { "type": "string", "minLength": 1, "pattern": "^(?![A-Za-z]:)(?![\\\\/])(?!.*(?:^|[\\\\/])\\.\\.(?:[\\\\/]|$)).+$" },
+    "notebook": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "filename", "source", "attachmentIds"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 }, "filename": { "$ref": "#/$defs/safePath" }, "source": { "type": "string" },
+        "lesson": { "$ref": "#/$defs/lesson" }, "dataReady": { "type": "object", "additionalProperties": { "type": "boolean" } },
+        "attachmentIds": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } }
+      }
+    },
+    "scope": { "oneOf": [
+      { "type": "object", "additionalProperties": false, "required": ["kind"], "properties": { "kind": { "const": "workspace" } } },
+      { "type": "object", "additionalProperties": false, "required": ["kind", "notebookId"], "properties": { "kind": { "const": "notebook" }, "notebookId": { "type": "string", "minLength": 1 } } }
+    ] },
+    "attachment": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "path", "size", "sha256", "mediaType", "scope", "source"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-f0-9]{64}:.+$" }, "path": { "$ref": "#/$defs/safePath" },
+        "size": { "type": "integer", "minimum": 0 }, "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "mediaType": { "type": "string", "minLength": 1 }, "scope": { "$ref": "#/$defs/scope" },
+        "source": { "oneOf": [
+          { "type": "object", "additionalProperties": false, "required": ["kind"], "properties": { "kind": { "const": "local" } } },
+          { "type": "object", "additionalProperties": false, "required": ["kind", "dataset"], "properties": { "kind": { "const": "dataset" }, "dataset": { "$ref": "#/$defs/dataset" } } },
+          { "type": "object", "additionalProperties": false, "required": ["kind", "url", "sourceBytes", "sourceSha256", "retrievedAt"], "properties": {
+            "kind": { "const": "url" }, "url": { "type": "string", "pattern": "^https://" }, "sourceBytes": { "type": "integer", "minimum": 0 },
+            "sourceSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }, "retrievedAt": { "type": "string", "format": "date-time" }
+          } },
+          { "type": "object", "additionalProperties": false, "required": ["kind", "producerNotebookId", "producerNotebookFilename", "variable", "format", "createdAt"], "properties": {
+            "kind": { "const": "output" }, "producerNotebookId": { "type": "string", "minLength": 1 }, "producerNotebookFilename": { "$ref": "#/$defs/safePath" },
+            "variable": { "type": "string", "minLength": 1 }, "format": { "enum": ["json", "csv", "tsv", "text"] }, "createdAt": { "type": "string", "format": "date-time" },
+            "executedSourceSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+          } }
+        ] }
+      }
+    },
+    "dataset": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "title", "path", "url", "bytes", "sha256", "mediaType", "source", "citation", "rights"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 }, "title": { "type": "string", "minLength": 1 }, "path": { "$ref": "#/$defs/safePath" },
+        "url": { "type": "string", "pattern": "^https://" }, "bytes": { "type": "integer", "minimum": 1 }, "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "mediaType": { "type": "string", "minLength": 1 }, "source": { "type": "string", "minLength": 1 }, "citation": { "type": "string", "minLength": 1 }, "rights": { "type": "string", "minLength": 1 }
+      }
+    },
+    "lesson": {
+      "type": "object", "additionalProperties": true,
+      "required": ["schema", "id", "title", "summary", "entry", "runtime", "estimatedMemoryMb", "source", "datasets", "tags"],
+      "properties": {
+        "schema": { "const": 1 }, "id": { "type": "string", "minLength": 1 }, "title": { "type": "string", "minLength": 1 }, "summary": { "type": "string" },
+        "entry": { "type": "string", "minLength": 1 }, "runtime": { "enum": ["browser", "desktop", "remote"] }, "estimatedMemoryMb": { "type": "number", "minimum": 0 },
+        "source": { "type": "object" }, "datasets": { "type": "array", "items": { "$ref": "#/$defs/dataset" } }, "tags": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}

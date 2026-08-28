@@ -1,4 +1,4 @@
-import type { AttachedFile, ExecutionResult, Kernel, KernelCapabilities } from "./protocol";
+import type { AttachedFile, ExecutionResult, Kernel, KernelCapabilities, VariableExport, VariableExportFormat, VariablePage } from "./protocol";
 
 interface SomerJob {
   id: string;
@@ -12,7 +12,8 @@ interface SomerJob {
 export class SomerKernel implements Kernel {
   readonly capabilities: KernelCapabilities = {
     kind: "somer", persistent: false, localFiles: true, largeFiles: true,
-    remote: true, cancel: true, description: "Remote BioLang execution through the SOMER v1 API"
+    remote: true, cancel: true, variableInspection: false, variableRemoval: false, variableExport: "none",
+    description: "Remote BioLang execution through the SOMER v1 API"
   };
   private files = new Map<string, AttachedFile>();
   private activeJob: string | null = null;
@@ -38,6 +39,15 @@ export class SomerKernel implements Kernel {
   reset() { return Promise.resolve(); }
   clearFiles() { this.files.clear(); return Promise.resolve(); }
   listVariables() { return Promise.resolve([]); }
+  inspectVariable(_name: string, _offset: number, _limit: number): Promise<VariablePage> {
+    return Promise.reject(new Error("SOMER jobs are stateless and do not expose an interactive variable environment."));
+  }
+  exportVariable(_name: string, _format: VariableExportFormat, _maximumBytes: number): Promise<VariableExport> {
+    return Promise.reject(new Error("Export remote job results through a declared SOMER output file."));
+  }
+  runtimeInfo() {
+    return Promise.resolve({ runtime: "somer" as const, description: this.capabilities.description, endpoint: this.endpoint });
+  }
 
   async execute(source: string): Promise<ExecutionResult> {
     const started = performance.now();

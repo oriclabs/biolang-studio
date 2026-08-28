@@ -18,6 +18,300 @@ test("runs prerequisite cells in the isolated WASM kernel", async ({ page }) => 
   await expect(page.getByText(/Earlier code cells were run when needed/)).toBeVisible();
 });
 
+test("exports a backend-disclosed, checksum-pinned run record", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.locator(".status")).toHaveText("ready", { timeout: 30_000 });
+  await page.locator("article.cell-code").first().getByTitle("Run this cell and any prerequisites").click();
+  await expect(page.getByText(/Finished through cell/)).toBeVisible();
+
+  await page.getByText("Workspace", { exact: true }).click();
+  const downloadEvent = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Export latest run record" }).click();
+  const download = await downloadEvent;
+  expect(download.suggestedFilename()).toMatch(/\.run\.json$/);
+  const stream = await download.createReadStream();
+  const chunks: Buffer[] = [];
+  for await (const chunk of stream) chunks.push(Buffer.from(chunk));
+  const record = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  expect(record).toMatchObject({ schema: 1, kind: "biolang-studio-run", success: true, runtime: { runtime: "browser" } });
+  expect(record.notebook.sourceSha256).toMatch(/^[0-9a-f]{64}$/);
+  expect(record.notebook.executedSourceSha256).toMatch(/^[0-9a-f]{64}$/);
+});
+
+test("uses native document open, atomic save metadata, recents, and external reload", async ({ page }) => {
+  await page.addInitScript(() => {
+    const state = window as typeof window & { __nativeCalls: Array<{ command: string; payload: any }>; __externalChanged: boolean; __diskSource: string };
+    state.__nativeCalls = []; state.__externalChanged = false; state.__diskSource = "# Native notebook\n\n```biolang\nlet native_value = 1\n```\n";
+    window.__BIOLANG_DESKTOP__ = { invoke: async <T,>(command: string, payload?: unknown) => {
+      state.__nativeCalls.push({ command, payload });
+      if (command === "studio_open_document") return { path: "C:\\work\\native-analysis.bln", filename: "native-analysis.bln", contents: state.__diskSource, size: state.__diskSource.length, sha256: state.__externalChanged ? "c".repeat(64) : "a".repeat(64), modifiedMs: 10 } as T;
+      if (command === "studio_save_document") {
+        const request = (payload as any).request;
+        state.__diskSource = request.contents;
+        return { status: "saved", path: "C:\\work\\native-analysis.bln", document: { path: "C:\\work\\native-analysis.bln", filename: "native-analysis.bln", contents: request.contents, size: request.contents.length, sha256: "b".repeat(64), modifiedMs: 20 } } as T;
+      }
+      if (command === "studio_document_status") return { exists: true, changed: state.__externalChanged, currentSha256: state.__externalChanged ? "c".repeat(64) : (payload as any).expectedSha256, modifiedMs: 30 } as T;
+      throw new Error(`Unexpected native command ${command}`);
+    }};
+  });
+  await page.goto("/");
+  await expect(page.locator(".status")).toHaveText("ready", { timeout: 30_000 });
+  await page.getByRole("button", { name: "Open", exact: true }).click();
+  await expect(page.getByLabel("Notebook name")).toHaveValue("native-analysis.bln");
+  await page.locator("textarea.code-editor").fill("let native_value = 2");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(page.getByText("Saved native-analysis.bln atomically.")).toBeVisible();
+  const saveRequest = await page.evaluate(() => (window as any).__nativeCalls.find((call: any) => call.command === "studio_save_document").payload.request);
+  expect(saveRequest.expectedSha256).toBe("a".repeat(64));
+
+  await page.locator("details.workspace-file-menu > summary").click();
+  await expect(page.getByText("Recent Desktop files")).toBeVisible();
+  await expect(page.getByRole("button", { name: "native-analysis.bln notebook" })).toBeVisible();
+  await page.locator("details.workspace-file-menu > summary").click();
+
+  await page.evaluate(() => { (window as any).__externalChanged = true; (window as any).__diskSource = "# Reloaded\n\n```biolang\nlet native_value = 3\n```\n"; window.dispatchEvent(new Event("focus")); });
+  await expect(page.getByText("Changed outside Studio", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Reload notebook" }).click();
+  await expect(page.locator("textarea.code-editor")).toHaveValue("let native_value = 3");
+});
+
+test("cancels native execution and namespaces kernel disposal across notebook tabs", async ({ page }) => {
+  await page.addInitScript(() => {
+    const state = window as typeof window & { __nativeCalls: Array<{ command: string; payload: any }>; __rejectExecute?: (error: Error) => void };
+    state.__nativeCalls = [];
+    window.__BIOLANG_DESKTOP__ = { invoke: async <T,>(command: string, payload?: unknown) => {
+      state.__nativeCalls.push({ command, payload });
+      if (command === "kernel_initialize") return {} as T;
+      if (command === "kernel_has_attachment") return false as T;
+      if (command === "kernel_variables") return { status: "ok", output: "", durationMs: 0, environment: { variables: [], totalBytes: 0 } } as T;
+      if (command === "kernel_execute") return await new Promise<T>((_resolve, reject) => { state.__rejectExecute = reject; });
+      if (command === "kernel_cancel") { state.__rejectExecute?.(new Error("cancelled")); return undefined as T; }
+      if (command === "kernel_dispose") return undefined as T;
+      if (command === "get_environment") return { blVersion: "BioLang 1.5.0", platform: "windows", architecture: "x86_64" } as T;
+      throw new Error(`Unexpected native command ${command}`);
+    }};
+  });
+  page.on("dialog", dialog => void dialog.accept());
+  await page.goto("/");
+  await expect(page.locator(".status")).toHaveText("ready", { timeout: 30_000 });
+  await page.locator(".kernel-switch select").selectOption("desktop");
+  await expect(page.locator(".status")).toHaveText("ready", { timeout: 30_000 });
+  await page.locator("article.cell-code").first().getByTitle("Run this cell and any prerequisites").click();
+  await expect(page.getByRole("button", { name: "Stop" })).toBeVisible();
+  await page.getByRole("button", { name: "Stop" }).click();
+  await expect(page.getByText(/next run will replay this notebook/)).toBeVisible();
+  await page.getByRole("button", { name: "New", exact: true }).click();
+  await expect(page.locator(".status")).toHaveText("ready", { timeout: 30_000 });
+  const calls = await page.evaluate(() => (window as any).__nativeCalls);
+  const initialized = calls.filter((call: any) => call.command === "kernel_initialize").map((call: any) => call.payload.namespace);
+  const disposed = calls.filter((call: any) => call.command === "kernel_dispose").map((call: any) => call.payload.namespace);
+  expect(initialized).toHaveLength(2);
+  expect(new Set(initialized).size).toBe(2);
+  expect(disposed).toContain(initialized[0]);
+});
+
+test("inspects variables in bounded pages and exports a small value", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.locator(".status")).toHaveText("ready", { timeout: 30_000 });
+  const values = Array.from({ length: 25 }, (_, index) => index + 1).join(", ");
+  const longValue = "A".repeat(300);
+  const cell = page.locator("article.cell-code").first();
+  await cell.locator("textarea.code-editor").fill(`let many = [${values}]\nlet exact = ["${longValue}"]`);
+  await cell.getByTitle("Run this cell and any prerequisites").click();
+
+  await page.locator("details.variables-disclosure > summary").click();
+  const variable = page.locator(".variable-item").filter({ hasText: "many" });
+  await expect(variable).toContainText("25 items");
+  await variable.getByTitle("Inspect many").click();
+  await expect(variable.locator(".variable-page-status")).toContainText("20 of 25 rows loaded");
+  await variable.getByRole("button", { name: "Load 20 more" }).click();
+  await expect(variable.locator(".variable-page-status")).toContainText("25 of 25 rows loaded");
+
+  const exact = page.locator(".variable-item").filter({ hasText: "exact" });
+  await exact.getByLabel("Actions for exact").click();
+  const downloadEvent = page.waitForEvent("download");
+  await exact.getByRole("button", { name: "Export value" }).click();
+  const download = await downloadEvent;
+  expect(download.suggestedFilename()).toBe("exact.json");
+  const stream = await download.createReadStream();
+  const chunks: Buffer[] = [];
+  for await (const chunk of stream) chunks.push(Buffer.from(chunk));
+  expect(JSON.parse(Buffer.concat(chunks).toString("utf8"))).toEqual([longValue]);
+});
+
+test("authors, runs, and collapses an optional lesson step", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.locator(".status")).toHaveText("ready", { timeout: 30_000 });
+  await page.getByRole("button", { name: "+ Step" }).click();
+  const editor = page.locator("textarea.markdown-editor").last();
+  await editor.fill('<!-- bl:step title="A grouped calculation" -->\n\nSet a value and inspect the result.\n\n```biolang\nlet grouped = 6\ngrouped * 7\n```\n\nThe result should be 42.\n\n<!-- /bl:step -->');
+  await page.locator(".document-head").click();
+
+  const step = page.locator(".lesson-step").last();
+  await expect(step.getByText("A grouped calculation")).toBeVisible();
+  await step.getByRole("button", { name: "Run step" }).click();
+  await expect(step.locator("article.cell-code .result")).toContainText("42", { timeout: 30_000 });
+
+  const variables = page.locator("details.variables-disclosure");
+  await expect(variables).not.toHaveAttribute("open", "");
+  await step.getByRole("button", { name: "Collapse A grouped calculation" }).click();
+  await expect(step.locator("article.cell")).toHaveCount(0);
+  await step.getByRole("button", { name: "Expand A grouped calculation" }).click();
+  await expect(step.locator("article.cell")).toHaveCount(3);
+});
+
+test("keeps notebook variables isolated while sharing an explicit data attachment", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.locator(".status")).toHaveText("ready", { timeout: 30_000 });
+  await page.locator("article.cell-code").first().getByTitle("Run this cell and any prerequisites").click();
+  await expect(page.locator("details.variables-disclosure summary small")).not.toHaveText("0");
+
+  await page.locator('input[type="file"][multiple]').setInputFiles({ name: "shared.csv", mimeType: "text/csv", buffer: Buffer.from("x\n1\n") });
+  const attachment = page.locator(".attached-data").filter({ hasText: "shared.csv" });
+  await attachment.getByRole("button", { name: "Share", exact: true }).click();
+  await expect(attachment).toContainText("all notebooks");
+
+  await page.getByRole("button", { name: "New", exact: true }).click();
+  await expect(page.getByRole("tab", { name: /untitled-2\.bln/ })).toHaveAttribute("aria-selected", "true");
+  await expect(page.locator(".attached-data").filter({ hasText: "shared.csv" })).toContainText("all notebooks");
+  await expect(page.locator("details.variables-disclosure summary small")).toHaveText("0");
+  await expect(page.locator(".status")).toHaveText("ready", { timeout: 30_000 });
+
+  await page.getByRole("button", { name: "+ Code" }).click();
+  await page.locator("textarea.code-editor").last().fill("measurements");
+  await page.locator("article.cell-code").last().getByTitle("Run this cell and any prerequisites").click();
+  await expect(page.locator("article.cell-code").last().locator(".result-error")).toContainText(/measurements|variable/i);
+
+  await page.waitForTimeout(1_000);
+  await page.reload();
+  await expect(page.getByRole("tab")).toHaveCount(2);
+  await expect(page.locator(".attached-data").filter({ hasText: "shared.csv" })).toContainText("all notebooks");
+});
+
+test("publishes a checksum-pinned output for a later notebook", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.locator(".status")).toHaveText("ready", { timeout: 30_000 });
+  await page.locator("article.cell-code").first().getByTitle("Run this cell and any prerequisites").click();
+  await expect(page.locator("details.variables-disclosure summary small")).not.toHaveText("0");
+  await page.locator("details.variables-disclosure > summary").click();
+  const variable = page.locator(".variable-item").filter({ hasText: "measurements" });
+  await variable.locator(".variable-actions > summary").click();
+  page.on("dialog", async dialog => {
+    if (dialog.type() === "prompt") await dialog.accept("outputs/measurements.json");
+    else await dialog.accept();
+  });
+  await variable.getByRole("button", { name: "Publish output…" }).click();
+
+  const output = page.locator(".attached-data").filter({ hasText: "outputs/measurements.json" });
+  await expect(output).toContainText("all notebooks");
+  await expect(output).toContainText("output from untitled.bln");
+  await expect(page.getByText(/Published measurements as outputs\/measurements\.json/)).toBeVisible();
+
+  await page.getByRole("button", { name: "New", exact: true }).click();
+  await expect(page.locator(".attached-data").filter({ hasText: "outputs/measurements.json" })).toContainText("all notebooks");
+});
+
+test("exports, imports, closes, and reopens a multi-notebook workspace", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.locator(".status")).toHaveText("ready", { timeout: 30_000 });
+  await page.getByLabel("Workspace name").fill("Two notebook study");
+  await page.getByRole("button", { name: "New", exact: true }).click();
+  await page.getByLabel("Notebook name").fill("second.bln");
+
+  const downloadEvent = page.waitForEvent("download");
+  await page.getByText("Workspace", { exact: true }).click();
+  await page.getByRole("button", { name: "Export .blw" }).click();
+  const download = await downloadEvent;
+  const stream = await download.createReadStream();
+  const chunks: Buffer[] = [];
+  for await (const chunk of stream) chunks.push(Buffer.from(chunk));
+  const workspaceBytes = Buffer.concat(chunks);
+  const workspace = JSON.parse(workspaceBytes.toString("utf8"));
+  expect(workspace.notebooks).toHaveLength(2);
+  expect(JSON.stringify(workspace)).not.toContain('"contents"');
+
+  const saveEvent = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await saveEvent;
+  await page.getByRole("button", { name: "Close second.bln" }).click();
+  await expect(page.getByRole("tab")).toHaveCount(1);
+  await page.getByRole("button", { name: "Reopen closed" }).click();
+  await expect(page.getByRole("tab")).toHaveCount(2);
+
+  await page.locator('input[accept*=".blw"]').setInputFiles({ name: "study.blw", mimeType: "application/json", buffer: workspaceBytes });
+  await expect(page.getByLabel("Workspace name")).toHaveValue("Two notebook study");
+  await expect(page.getByRole("tab")).toHaveCount(2);
+});
+
+test("reviews an independent HTTPS file before downloading and records provenance", async ({ page }) => {
+  const contents = Buffer.from("gene,value\nTP53,3\n");
+  let requests = 0;
+  await page.route("https://data.example.test/remote.csv", async route => {
+    requests += 1;
+    await route.fulfill({ status: 200, contentType: "text/csv", headers: { "access-control-allow-origin": "*" }, body: contents });
+  });
+  await page.goto("/");
+  await expect(page.locator(".status")).toHaveText("ready", { timeout: 30_000 });
+  await page.getByRole("button", { name: "From URL…" }).click();
+  await page.getByLabel("HTTPS source URL").fill("http://data.example.test/remote.csv");
+  await page.getByRole("button", { name: "Review", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("must use HTTPS");
+  expect(requests).toBe(0);
+  await page.getByLabel("HTTPS source URL").fill("https://data.example.test/remote.csv");
+  await expect(page.getByLabel("Mount path")).toHaveValue("remote.csv");
+  await page.getByLabel(/Expected bytes/).fill(String(contents.byteLength));
+  await page.getByRole("button", { name: "Review", exact: true }).click();
+  expect(requests).toBe(0);
+  await expect(page.getByText("Review remote data")).toBeVisible();
+  await expect(page.locator(".url-review")).toContainText("No published checksum supplied");
+  await page.getByRole("button", { name: "Download and attach" }).click();
+  await expect(page.locator(".attached-data").filter({ hasText: "remote.csv" })).toContainText("HTTPS source");
+  expect(requests).toBe(1);
+
+  const downloadEvent = page.waitForEvent("download");
+  await page.getByText("Workspace", { exact: true }).click();
+  await page.getByRole("button", { name: "Export .blw" }).click();
+  const stream = await (await downloadEvent).createReadStream();
+  const chunks: Buffer[] = [];
+  for await (const chunk of stream) chunks.push(Buffer.from(chunk));
+  const workspace = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  expect(workspace.schema).toBe(3);
+  expect(workspace.attachments[0].source).toMatchObject({ kind: "url", url: "https://data.example.test/remote.csv", sourceBytes: contents.byteLength });
+  expect(workspace.attachments[0].source.sourceSha256).toMatch(/^[a-f0-9]{64}$/);
+  expect(workspace.attachments[0]).not.toHaveProperty("contents");
+});
+
+test("recovers a valid backup when the primary session is interrupted", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "New", exact: true }).click();
+  await page.waitForTimeout(1_000);
+  await page.getByLabel("Workspace name").fill("Recovery checkpoint");
+  await page.waitForTimeout(1_000);
+  await page.evaluate(async () => {
+    const root = await navigator.storage.getDirectory();
+    const workspaces = await root.getDirectoryHandle("workspaces");
+    const primary = await workspaces.getFileHandle("__studio-session-v1.json");
+    const writable = await primary.createWritable();
+    await writable.write("{interrupted");
+    await writable.close();
+  });
+  await page.reload();
+  await expect(page.getByText(/Recovered 2 notebooks from the backup session copy/)).toBeVisible();
+  await expect(page.getByRole("tab")).toHaveCount(2);
+});
+
+test("clears cached data without deleting notebook references", async ({ page }) => {
+  await page.goto("/");
+  await page.locator('input[type="file"][multiple]').setInputFiles({ name: "cached.csv", mimeType: "text/csv", buffer: Buffer.from("x\n1\n") });
+  await page.locator("details.storage-disclosure summary").click();
+  page.once("dialog", dialog => dialog.accept());
+  await page.getByRole("button", { name: "Clear cached data" }).click();
+  const attachment = page.locator(".attached-data").filter({ hasText: "cached.csv" });
+  await expect(attachment).toContainText("needs data");
+  await expect(attachment.getByRole("button", { name: "Reattach" })).toBeVisible();
+  await expect(page.locator("article.cell")).not.toHaveCount(0);
+});
+
 test("adds and removes an external lesson package on demand", async ({ page }) => {
   await page.route("https://lessons.example.test/demo/lesson.json", route => route.fulfill({
     json: {
