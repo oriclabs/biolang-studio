@@ -65,7 +65,7 @@ test("discovers, verifies, runs, and removes a registry lesson", async ({ page }
     summary: "Discovered without being bundled into Studio.", publisher: "test", version: "0.1.0",
     status: "preview", verified: false, manifest: "https://registry-lesson.example.test/lesson.json", manifestSha256,
     publishedAt: "2026-08-27", compatibility: { biolang: ">=1.5.0", studio: ">=0.1.0", runtimes: ["browser"] },
-    tags: ["test"], sourceRepository: "https://github.com/example/registry-demo", licence: "MIT", validation: "fixture"
+    categories: ["teaching"], tags: ["test"], sourceRepository: "https://github.com/example/registry-demo", licence: "MIT", validation: "fixture"
   }] } }));
   await page.route("https://registry-lesson.example.test/lesson.json", route => route.fulfill({ contentType: "application/json", body: manifestText }));
   await page.route("https://registry-lesson.example.test/lesson.bln", route => route.fulfill({ contentType: "text/plain", body: "# Registry lesson\n\n```biolang\nlet tiny = read_csv(\"tiny.csv\")\nnrow(tiny)\n```\n" }));
@@ -97,7 +97,7 @@ test("rejects a registry lesson when its manifest checksum differs", async ({ pa
     schema: 1, kind: "lesson", id: "test/tampered", name: "tampered", title: "Tampered lesson",
     summary: "Negative security fixture.", publisher: "test", version: "0.1.0", status: "preview", verified: false,
     manifest: "https://registry-lesson.example.test/tampered.json", manifestSha256: "0".repeat(64),
-    publishedAt: "2026-08-27", compatibility: { runtimes: ["browser"] }, tags: ["test"],
+    publishedAt: "2026-08-27", compatibility: { runtimes: ["browser"] }, categories: ["teaching"], tags: ["test"],
     sourceRepository: "https://github.com/example/tampered", licence: "MIT", validation: "fixture"
   }] } }));
   await page.route("https://registry-lesson.example.test/tampered.json", route => route.fulfill({ contentType: "application/json", body: "{}" }));
@@ -105,4 +105,37 @@ test("rejects a registry lesson when its manifest checksum differs", async ({ pa
   await page.getByRole("button", { name: "Install Tampered lesson" }).click();
   await expect(page.getByText(/failed its registry SHA-256 check/)).toBeVisible();
   await expect(page.getByText("No lesson packages installed.")).toBeVisible();
+});
+
+test("searches and prepares a registered dataset on demand", async ({ page }) => {
+  const datasetManifest = {
+    schema: 1, kind: "dataset", id: "test/tiny-cells", version: "1.0.0", title: "Tiny cells",
+    summary: "A tiny browser fixture.", description: "Synthetic tabular data for registry download testing.",
+    categories: ["single-cell"], tags: ["PBMC"], modalities: ["RNA"], organisms: ["Homo sapiens"],
+    provider: "oriclabs/direct-https", access: { kind: "public", requiresAcceptance: false },
+    source: { landingPage: "https://datasets.example.test/tiny", citation: "Synthetic fixture", licence: "CC0", rights: "Test data" },
+    files: [{ id: "cells", title: "Tiny cells CSV", path: "tiny-cells.csv", url: "https://datasets.example.test/tiny.csv",
+      bytes: 12, sha256: "2a2b86e74ffd5e6a9b75e52a105cf9d02920837179f8e8961aa15411d380f7a3",
+      mediaType: "text/csv", format: "csv", compression: "none", role: "primary", reader: "read_csv" }]
+  };
+  const manifestText = JSON.stringify(datasetManifest);
+  const manifestSha256 = createHash("sha256").update(manifestText).digest("hex");
+  await page.unroute(REGISTRY);
+  await page.route(REGISTRY, route => route.fulfill({ json: { schema: 1, entries: [{
+    schema: 1, kind: "dataset", id: "test/tiny-cells", name: "tiny-cells", title: "Tiny cells",
+    summary: "A tiny browser fixture.", publisher: "test", version: "1.0.0", status: "stable", verified: true,
+    manifest: "https://datasets.example.test/dataset.json", manifestSha256, publishedAt: "2026-08-28",
+    compatibility: { runtimes: ["browser", "desktop", "somer", "cli"] }, categories: ["single-cell"], tags: ["PBMC"],
+    sourceRepository: "https://github.com/example/tiny-cells", licence: "CC0", validation: "registry-verified",
+    dataset: { provider: "oriclabs/direct-https", access: "public", formats: ["csv"], modalities: ["RNA"], organisms: ["Homo sapiens"], fileCount: 1, totalBytes: 12 }
+  }] } }));
+  await page.route("https://datasets.example.test/dataset.json", route => route.fulfill({ contentType: "application/json", body: manifestText }));
+  await page.route("https://datasets.example.test/tiny.csv", route => route.fulfill({ contentType: "text/csv", body: "x,y\n1,2\n3,4\n" }));
+
+  await page.goto("/");
+  await page.getByLabel("Registry kind").selectOption("dataset");
+  await page.getByLabel("Registry search").fill("sapiens csv");
+  await expect(page.getByText("Tiny cells")).toBeVisible();
+  await page.getByRole("button", { name: "Prepare Tiny cells" }).click();
+  await expect(page.getByText(/checksum-verified, cached, and attached/)).toBeVisible();
 });

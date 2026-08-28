@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { CatalogEntry, LessonManifest } from "./content/manifest";
+import type { CatalogEntry, DatasetManifest, LessonManifest } from "./content/manifest";
 import { validateManifest } from "./content/manifest";
 import { installLesson, installedLessons, uninstallLesson } from "./content/installed";
-import { DEFAULT_REGISTRY_URL, fetchRegistry, type RegistryEntry, type RegistrySource } from "./content/registry";
+import { DEFAULT_REGISTRY_URL, fetchRegisteredDataset, fetchRegistry, searchRegistry, type RegistryEntry, type RegistryKind, type RegistrySource } from "./content/registry";
 import type { AttachedFile, ExecutionResult, Kernel, KernelKind, StructuredResult } from "./kernel/protocol";
 import { DesktopKernel, desktopAvailable } from "./kernel/desktop-client";
 import { SomerKernel } from "./kernel/somer-client";
@@ -84,6 +84,8 @@ export default function App() {
   const [registrySource, setRegistrySource] = useState<RegistrySource | "loading" | "unavailable">("loading");
   const [registryError, setRegistryError] = useState("");
   const [installingId, setInstallingId] = useState("");
+  const [registryQuery, setRegistryQuery] = useState("");
+  const [registryKind, setRegistryKind] = useState<RegistryKind>("lesson");
 
   useEffect(() => {
     fetch("./catalog/index.json").then(response => response.json()).then((builtIn: CatalogEntry[]) => {
@@ -111,7 +113,8 @@ export default function App() {
   }, [cells, filename]);
 
   const codeCount = useMemo(() => cells.filter(cell => cell.type === "code").length, [cells]);
-  const discoverable = useMemo(() => registryEntries.filter(entry => entry.kind === "lesson" && entry.status !== "withdrawn" && !catalog.some(item => item.id === entry.name)), [registryEntries, catalog]);
+  const discoverable = useMemo(() => searchRegistry(registryEntries, registryQuery, registryKind)
+    .filter(entry => entry.kind !== "lesson" || !catalog.some(item => item.id === entry.name)), [registryEntries, registryQuery, registryKind, catalog]);
 
   function updateCell(index: number, patch: Partial<Cell>) {
     setCells(current => current.map((cell, position) => position === index ? { ...cell, ...patch } : cell));
@@ -251,6 +254,34 @@ export default function App() {
     finally { setInstallingId(""); }
   }
 
+  async function prepareRegistryDataset(entry: RegistryEntry) {
+    if (!kernelRef.current) return;
+    setInstallingId(entry.id);
+    try {
+      const manifest = await fetchRegisteredDataset(entry);
+      if (manifest.provider !== "oriclabs/direct-https") throw new Error(`Provider '${manifest.provider}' needs a Studio adapter that is not installed.`);
+      if (manifest.access.kind === "controlled") throw new Error("Controlled-access data must be prepared by BioLang Desktop or SOMER with credentials kept outside the registry.");
+      if (manifest.access.requiresAcceptance && !window.confirm(`Review and accept the source terms for ${manifest.title}${manifest.access.termsUrl ? `:\n${manifest.access.termsUrl}` : ""}`)) return;
+      const total = manifest.files.reduce((sum, file) => sum + file.bytes, 0);
+      if (kernelKind === "browser" && total > 50 * 1024 ** 2) throw new Error(`${manifest.title} is larger than the 50 MB browser guidance limit. Use bl data fetch, BioLang Desktop, or SOMER.`);
+      for (const declared of manifest.files) {
+        if (!declared.mediaType.startsWith("text/") && declared.mediaType !== "application/json") throw new Error(`${declared.title} is binary. Prepare it with bl data fetch or a native/remote kernel.`);
+        const key = `${entry.id}:${declared.id}`;
+        const dataset: DatasetManifest = {
+          id: key, title: declared.title, path: declared.path, url: declared.url, bytes: declared.bytes,
+          sha256: declared.sha256, mediaType: declared.mediaType, source: manifest.source.landingPage,
+          citation: manifest.source.citation, rights: manifest.source.rights
+        };
+        setNotice({ tone: "info", text: `Downloading ${declared.title} from ${manifest.provider}…` });
+        const file = await prepareDataset(dataset, loaded => setProgress(current => ({ ...current, [key]: loaded })));
+        attachedRef.current.set(file.path, file); await kernelRef.current.attach(file);
+        setDataReady(current => ({ ...current, [key]: true }));
+      }
+      setNotice({ tone: "good", text: `${manifest.title} was checksum-verified, cached, and attached. Use the declared file paths in this notebook.` });
+    } catch (error) { setNotice({ tone: "bad", text: error instanceof Error ? error.message : String(error) }); }
+    finally { setInstallingId(""); }
+  }
+
   async function removePackage(entry: CatalogEntry) {
     const stored = installedLessons().find(item => item.id === entry.id);
     if (stored?.datasets) await Promise.all(stored.datasets.map(removeDataset));
@@ -304,10 +335,11 @@ export default function App() {
       <section className="discover"><div className="section-head"><h2>Discover</h2><button title="Refresh lesson registry" onClick={() => void refreshRegistry()}>↻</button></div>
         {registrySource === "loading" ? <p className="muted">Checking the lesson registry…</p> : registrySource === "unavailable" ? <div className="registry-message"><p>Registry unavailable.</p><span title={registryError}>You can still open installed lessons or add a manifest URL.</span></div> : <>
           <div className="registry-state"><a href={DEFAULT_REGISTRY_URL} target="_blank" rel="noreferrer">Official registry</a><span>{registrySource === "cache" ? "offline cache" : "live"}</span></div>
+          <div className="registry-filter"><input aria-label="Registry search" value={registryQuery} onChange={event => setRegistryQuery(event.target.value)} placeholder="Search registry"/><select aria-label="Registry kind" value={registryKind} onChange={event => setRegistryKind(event.target.value as RegistryKind)}><option value="lesson">Lessons</option><option value="dataset">Datasets</option><option value="provider">Providers</option><option value="package">Packages</option><option value="workflow">Workflows</option><option value="tool">Tools</option></select></div>
           {discoverable.length ? discoverable.map(entry => <div className="registry-entry" key={`${entry.id}@${entry.version}`}>
             <div className="registry-title"><strong>{entry.title}</strong><span className={`trust-badge ${entry.verified ? "verified" : "preview"}`}>{entry.verified ? "Verified" : entry.status}</span></div>
-            <p>{entry.summary}</p><div className="registry-meta"><span>{entry.publisher} · v{entry.version} · {entry.licence}</span><button disabled={installingId === entry.id} aria-label={`Install ${entry.title}`} onClick={() => void installRegistryEntry(entry)}>{installingId === entry.id ? "Checking…" : "Install"}</button></div>
-          </div>) : <p className="muted">All available lessons are installed.</p>}
+            <p>{entry.summary}</p><div className="registry-categories">{entry.categories.map(category => <span key={category}>{category}</span>)}</div><div className="registry-meta"><span>{entry.publisher} · v{entry.version} · {entry.kind === "dataset" && entry.dataset ? displayBytes(entry.dataset.totalBytes) : entry.licence}</span>{entry.kind === "lesson" ? <button disabled={installingId === entry.id} aria-label={`Install ${entry.title}`} onClick={() => void installRegistryEntry(entry)}>{installingId === entry.id ? "Checking…" : "Install"}</button> : entry.kind === "dataset" ? <button disabled={installingId === entry.id} aria-label={`Prepare ${entry.title}`} onClick={() => void prepareRegistryDataset(entry)}>{installingId === entry.id ? "Checking…" : "Prepare"}</button> : entry.kind === "provider" && entry.provider ? <a href={entry.provider.apiDocumentation} target="_blank" rel="noreferrer">API docs</a> : null}</div>
+          </div>) : <p className="muted">No registry entries matched.</p>}
         </>}
       </section>
       <section><div className="section-head"><h2>Installed lessons</h2><button title="Add lesson package" onClick={() => setPackageOpen(true)}>＋</button></div>{catalog.length ? catalog.map(item => <div className={`lesson-row ${lesson?.id === item.id ? "active" : ""}`} key={item.id}><button className="lesson-link" onClick={() => void loadLesson(item)}><strong>{item.title}</strong><span>{item.summary}</span></button><button className="remove-package" title={`Remove ${item.title}`} onClick={() => void removePackage(item)}>×</button></div>) : <div className="empty-catalog"><p>No lesson packages installed.</p><button onClick={() => setPackageOpen(true)}>Add from manifest URL</button></div>}</section>
