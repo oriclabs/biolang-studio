@@ -2,11 +2,21 @@ import { createHash } from "node:crypto";
 import { chromium } from "@playwright/test";
 
 const studioUrl = process.env.STUDIO_URL || "https://oriclabs.com/biolang-studio/";
-const registryUrl = "https://raw.githubusercontent.com/oriclabs/biolang-registry/main/registry/v1/index.json";
+const registryUrls = [
+  process.env.REGISTRY_URL || "https://registry.lang.bio/v1/index.json",
+  "https://raw.githubusercontent.com/oriclabs/biolang-registry/main/registry/v1/index.json",
+];
 const lessonTitle = "Essential statistics with NHANES";
 
-const registryResponse = await fetch(registryUrl, { cache: "no-store" });
-if (!registryResponse.ok) throw new Error(`Registry HTTP ${registryResponse.status}`);
+let registryResponse;
+let registryUrl;
+for (const candidate of registryUrls) {
+  try {
+    const response = await fetch(candidate, { cache: "no-store" });
+    if (response.ok) { registryResponse = response; registryUrl = candidate; break; }
+  } catch { /* Try the published GitHub fallback used by Studio. */ }
+}
+if (!registryResponse) throw new Error("Published registry and fallback are unavailable.");
 const registry = await registryResponse.json();
 const entry = registry.entries?.find(item => item.id === "oriclabs/bdsr-essential-statistics");
 if (!entry) throw new Error("Published registry does not contain the BDSR lesson.");
@@ -25,6 +35,7 @@ page.on("pageerror", error => browserErrors.push(error.message));
 try {
   await page.goto(studioUrl, { waitUntil: "networkidle", timeout: 60_000 });
   await page.locator(".status-ready").waitFor({ timeout: 60_000 });
+  await page.getByRole("button", { name: "Registry", exact: true }).click();
   await page.getByRole("button", { name: `Install ${lessonTitle}` }).waitFor({ timeout: 30_000 });
   await page.getByRole("button", { name: `Install ${lessonTitle}` }).click();
   await page.waitForFunction(() => document.querySelector('input[aria-label="Notebook name"]')?.value === "bdsr-essential-statistics.bln", undefined, { timeout: 30_000 });
@@ -45,9 +56,10 @@ try {
   if (plots < 10) throw new Error(`Expected at least 10 BioLang plots, rendered ${plots}.`);
 
   await page.getByTitle(`Remove ${lessonTitle}`).click();
+  await page.getByRole("button", { name: "Registry", exact: true }).click();
   await page.getByRole("button", { name: `Install ${lessonTitle}` }).waitFor();
   if (browserErrors.length) throw new Error(`Browser errors: ${browserErrors.join(" | ")}`);
-  console.log(JSON.stringify({ studioUrl, registryEntries: registry.entries.length, manifestSha256, preparedDatasets: datasetCount, renderedPlots: plots, removedCleanly: true }, null, 2));
+  console.log(JSON.stringify({ studioUrl, registryUrl, registryEntries: registry.entries.length, manifestSha256, preparedDatasets: datasetCount, renderedPlots: plots, removedCleanly: true }, null, 2));
 } catch (error) {
   const state = await page.locator(".status").textContent().catch(() => "missing");
   const notice = await page.locator(".notice").textContent().catch(() => "missing");
