@@ -1,10 +1,12 @@
 import { expect, test } from "@playwright/test";
 import { createHash } from "node:crypto";
 
-const REGISTRY = "https://raw.githubusercontent.com/oriclabs/biolang-registry/main/registry/v1/index.json";
+const REGISTRY = "https://registry.lang.bio/v1/index.json";
+const REGISTRY_FALLBACK = "https://raw.githubusercontent.com/oriclabs/biolang-registry/main/registry/v1/index.json";
 
 test.beforeEach(async ({ page }) => {
   await page.route(REGISTRY, route => route.fulfill({ json: { schema: 1, entries: [] } }));
+  await page.route(REGISTRY_FALLBACK, route => route.fulfill({ json: { schema: 1, entries: [] } }));
 });
 
 test("runs prerequisite cells in the isolated WASM kernel", async ({ page }) => {
@@ -72,13 +74,16 @@ test("discovers, verifies, runs, and removes a registry lesson", async ({ page }
   await page.route("https://registry-lesson.example.test/tiny.csv", route => route.fulfill({ contentType: "text/csv", body: "x,y\n1,2\n3,4\n" }));
 
   await page.goto("/");
-  await expect(page.getByText("Official registry")).toBeVisible();
-  await expect(page.getByText("Registry demo")).toBeVisible();
+  await page.getByRole("button", { name: "Registry", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Registry", exact: true })).toBeVisible();
+  await expect(page.getByLabel("Registry entry details").getByRole("heading", { name: "Registry demo" })).toBeVisible();
   await page.unroute(REGISTRY);
   await page.route(REGISTRY, route => route.abort());
+  await page.unroute(REGISTRY_FALLBACK);
+  await page.route(REGISTRY_FALLBACK, route => route.abort());
   await page.reload();
   await expect(page.getByText("offline cache")).toBeVisible();
-  await expect(page.getByText("Registry demo")).toBeVisible();
+  await expect(page.getByLabel("Registry entry details").getByRole("heading", { name: "Registry demo" })).toBeVisible();
   await page.getByRole("button", { name: "Install Registry demo" }).click();
   await expect(page.getByText(/checksum-verified and installed/)).toBeVisible();
   await expect(page.locator('input[aria-label="Notebook name"]')).toHaveValue("registry-demo.bln");
@@ -87,7 +92,8 @@ test("discovers, verifies, runs, and removes a registry lesson", async ({ page }
   await page.locator("article.cell-code").getByTitle("Run this cell and any prerequisites").click();
   await expect(page.locator("article.cell-code .result")).toContainText("2");
   await page.getByTitle("Remove Registry demo").click();
-  await expect(page.getByText("Registry demo")).toBeVisible();
+  await page.getByRole("button", { name: "Registry", exact: true }).click();
+  await expect(page.getByLabel("Registry entry details").getByRole("heading", { name: "Registry demo" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Install Registry demo" })).toBeVisible();
 });
 
@@ -102,9 +108,10 @@ test("rejects a registry lesson when its manifest checksum differs", async ({ pa
   }] } }));
   await page.route("https://registry-lesson.example.test/tampered.json", route => route.fulfill({ contentType: "application/json", body: "{}" }));
   await page.goto("/");
+  await page.getByRole("button", { name: "Registry", exact: true }).click();
   await page.getByRole("button", { name: "Install Tampered lesson" }).click();
   await expect(page.getByText(/failed its registry SHA-256 check/)).toBeVisible();
-  await expect(page.getByText("No lesson packages installed.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Install Tampered lesson" })).toBeVisible();
 });
 
 test("searches and prepares a registered dataset on demand", async ({ page }) => {
@@ -133,9 +140,13 @@ test("searches and prepares a registered dataset on demand", async ({ page }) =>
   await page.route("https://datasets.example.test/tiny.csv", route => route.fulfill({ contentType: "text/csv", body: "x,y\n1,2\n3,4\n" }));
 
   await page.goto("/");
-  await page.getByLabel("Registry kind").selectOption("dataset");
+  await page.getByRole("button", { name: "Registry", exact: true }).click();
+  await expect(page).toHaveURL(/view=registry/);
+  await page.getByRole("tab", { name: /Datasets/ }).click();
   await page.getByLabel("Registry search").fill("sapiens csv");
-  await expect(page.getByText("Tiny cells")).toBeVisible();
+  await expect(page).toHaveURL(/kind=dataset/);
+  await expect(page).toHaveURL(/q=sapiens(?:\+|%20)csv/);
+  await expect(page.getByLabel("Registry entry details").getByRole("heading", { name: "Tiny cells" })).toBeVisible();
   await page.getByRole("button", { name: "Prepare Tiny cells" }).click();
   await expect(page.getByText(/checksum-verified, cached, and attached/)).toBeVisible();
 });

@@ -1,4 +1,5 @@
-export const DEFAULT_REGISTRY_URL = "https://raw.githubusercontent.com/oriclabs/biolang-registry/main/registry/v1/index.json";
+export const DEFAULT_REGISTRY_URL = "https://registry.lang.bio/v1/index.json";
+export const FALLBACK_REGISTRY_URL = "https://raw.githubusercontent.com/oriclabs/biolang-registry/main/registry/v1/index.json";
 
 const CACHE_KEY = "biolang-studio:registry:v1";
 const KINDS = new Set(["lesson", "package", "workflow", "tool", "dataset", "provider"]);
@@ -81,7 +82,21 @@ export interface RegisteredDatasetManifest {
 }
 
 export interface RegistryIndex { schema: 1; entries: RegistryEntry[] }
-export type RegistrySource = "network" | "cache";
+export type RegistrySource = "network" | "fallback" | "cache";
+export type RegistryKindFilter = RegistryKind | "all";
+export type RegistryAccessFilter = "all" | "public" | "registration" | "controlled";
+export type RegistryVerificationFilter = "all" | "verified" | "preview";
+export type RegistrySort = "relevance" | "recent" | "name" | "size";
+
+export interface RegistryFilters {
+  query?: string;
+  kind?: RegistryKindFilter;
+  category?: string;
+  runtime?: string;
+  access?: RegistryAccessFilter;
+  verification?: RegistryVerificationFilter;
+  sort?: RegistrySort;
+}
 
 function isHttps(value: unknown): value is string {
   return typeof value === "string" && value.startsWith("https://");
@@ -120,6 +135,32 @@ export function searchRegistry(entries: RegistryEntry[], query = "", kind: Regis
         ...(entry.provider?.capabilities ?? [])].join(" ").toLowerCase();
       return terms.every(term => text.includes(term));
     });
+}
+
+function searchScore(entry: RegistryEntry, terms: string[]) {
+  if (!terms.length) return 0;
+  const id = entry.id.toLowerCase();
+  const title = entry.title.toLowerCase();
+  const tags = entry.tags.join(" ").toLowerCase();
+  return terms.reduce((score, term) => score +
+    (title.includes(term) ? 8 : 0) + (id.includes(term) ? 5 : 0) + (tags.includes(term) ? 3 : 0), 0);
+}
+
+export function filterRegistry(entries: RegistryEntry[], filters: RegistryFilters = {}) {
+  const terms = (filters.query ?? "").toLowerCase().trim().split(/\s+/).filter(Boolean);
+  const filtered = searchRegistry(entries, filters.query, filters.kind, filters.category)
+    .filter(entry => !filters.runtime || entry.compatibility.runtimes.includes(filters.runtime as RegistryEntry["compatibility"]["runtimes"][number]))
+    .filter(entry => !filters.access || filters.access === "all" || entry.dataset?.access === filters.access)
+    .filter(entry => !filters.verification || filters.verification === "all" ||
+      (filters.verification === "verified" ? entry.verified : !entry.verified));
+
+  return [...filtered].sort((left, right) => {
+    if (filters.sort === "name") return left.title.localeCompare(right.title) || right.version.localeCompare(left.version, undefined, { numeric: true });
+    if (filters.sort === "size") return (right.dataset?.totalBytes ?? -1) - (left.dataset?.totalBytes ?? -1) || left.title.localeCompare(right.title);
+    if (filters.sort === "recent") return right.publishedAt.localeCompare(left.publishedAt) || left.title.localeCompare(right.title);
+    const score = searchScore(right, terms) - searchScore(left, terms);
+    return score || Number(right.verified) - Number(left.verified) || right.publishedAt.localeCompare(left.publishedAt) || left.title.localeCompare(right.title);
+  });
 }
 
 export function validateRegisteredDatasetManifest(value: unknown, entry?: RegistryEntry): RegisteredDatasetManifest {
@@ -174,20 +215,22 @@ export function validateRegistry(value: unknown): RegistryIndex {
   return { schema: 1, entries };
 }
 
-export async function fetchRegistry(url = DEFAULT_REGISTRY_URL): Promise<{ index: RegistryIndex; source: RegistrySource }> {
-  try {
-    const response = await fetch(url, { credentials: "omit", referrerPolicy: "no-referrer", cache: "no-cache" });
-    if (!response.ok) throw new Error(`Registry returned HTTP ${response.status}.`);
-    const text = await response.text();
-    const index = validateRegistry(JSON.parse(text));
-    localStorage.setItem(CACHE_KEY, text);
-    return { index, source: "network" };
-  } catch (networkError) {
-    const cached = localStorage.getItem(CACHE_KEY);
-    if (cached) {
-      try { return { index: validateRegistry(JSON.parse(cached)), source: "cache" }; }
-      catch { localStorage.removeItem(CACHE_KEY); }
-    }
-    throw networkError;
+export async function fetchRegistry(urls: string[] = [DEFAULT_REGISTRY_URL, FALLBACK_REGISTRY_URL]): Promise<{ index: RegistryIndex; source: RegistrySource }> {
+  let networkError: unknown = new Error("Registry is unavailable.");
+  for (const [index, url] of urls.entries()) {
+    try {
+      const response = await fetch(url, { credentials: "omit", referrerPolicy: "no-referrer", cache: "no-cache" });
+      if (!response.ok) throw new Error(`Registry returned HTTP ${response.status}.`);
+      const text = await response.text();
+      const registry = validateRegistry(JSON.parse(text));
+      localStorage.setItem(CACHE_KEY, text);
+      return { index: registry, source: index === 0 ? "network" : "fallback" };
+    } catch (error) { networkError = error; }
   }
+  const cached = localStorage.getItem(CACHE_KEY);
+  if (cached) {
+    try { return { index: validateRegistry(JSON.parse(cached)), source: "cache" }; }
+    catch { localStorage.removeItem(CACHE_KEY); }
+  }
+  throw networkError;
 }

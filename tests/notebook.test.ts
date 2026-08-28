@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { directives, executableSource, parseNotebook, serializeNotebook } from "../src/notebook/format";
 import { validateManifest } from "../src/content/manifest";
-import { searchRegistry, validateRegisteredDatasetManifest, validateRegistry, type RegistryEntry } from "../src/content/registry";
+import { filterRegistry, searchRegistry, validateRegisteredDatasetManifest, validateRegistry, type RegistryEntry } from "../src/content/registry";
 
 describe("BioLang notebook format", () => {
   it("round trips prose and executable fences", () => {
@@ -34,6 +34,8 @@ describe("content manifests", () => {
     } as RegistryEntry;
     expect(searchRegistry([entry], "sapiens mtx", "dataset", "single-cell")).toEqual([entry]);
     expect(searchRegistry([entry], "mouse", "dataset")).toEqual([]);
+    expect(filterRegistry([entry], { runtime: "browser", access: "public", verification: "verified" })).toEqual([entry]);
+    expect(filterRegistry([entry], { runtime: "desktop", access: "controlled" })).toEqual([]);
   });
   it("rejects traversal in registered dataset files", () => {
     expect(() => validateRegisteredDatasetManifest({

@@ -16,6 +16,7 @@ It is deliberately separate from `bl.exe`: the CLI stays small and scriptable, w
 - PWA shell and private workspace autosave using OPFS with a local-storage fallback;
 - a SOMER remote kernel using the same `/v1` contract as BioLang Desktop;
 - an interface for a future native desktop bridge;
+- a full registry workspace with shareable searches, content/runtime/category/access/trust filters, provenance and file details, and runtime-aware actions;
 - registry-discovered lessons, datasets, and provider metadata, with client-side search and on-demand verified preparation;
 - custom lesson packages that users can add and remove without rebuilding Studio.
 
@@ -42,5 +43,9 @@ After a public deployment, `npm run test:live` verifies the published registry a
 ## Content policy
 
 Studio ships no subject-specific lessons. It discovers metadata from the separate `biolang-registry`, or accepts a custom HTTPS manifest URL, and can remove a lesson together with its cached declared datasets. Discovery does not install a lesson or download data. Registry installation verifies the exact manifest bytes against the registry SHA-256 before parsing them. The content repository—not Studio—owns that lesson's examples, reference results, citations, and validation tests.
+
+The public catalogue reads `https://registry.lang.bio/v1/index.json`, falls back to the GitHub-hosted index when the custom domain is unavailable, and then falls back to its last validated browser cache. Catalogue filters and the selected entry are encoded in the page URL so a search can be shared without installing anything.
+
+Lessons remain ordinary `.bln` documents rather than a Studio-only format. Markdown is parsed into explanation cells and fenced `biolang` blocks are parsed into runnable code cells automatically. Code-block directives such as `# @skip` and `# @hide-output` travel with the notebook.
 
 Lesson and registered-dataset manifests declare source URL, exact bytes, SHA-256, citation, and rights note. Studio downloads only after the user chooses Prepare, verifies the response, caches it locally, and attaches supported text data to the active kernel. Provider entries describe reviewed built-in adapters; the registry cannot supply executable downloader code or credentials. Large and binary data belongs in `bl data fetch`, native Desktop/SOMER, or a range-aware format; it is not checked into this repository or silently loaded by a lesson.

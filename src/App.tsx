@@ -4,16 +4,39 @@ import remarkGfm from "remark-gfm";
 import type { CatalogEntry, DatasetManifest, LessonManifest } from "./content/manifest";
 import { validateManifest } from "./content/manifest";
 import { installLesson, installedLessons, uninstallLesson } from "./content/installed";
-import { DEFAULT_REGISTRY_URL, fetchRegisteredDataset, fetchRegistry, searchRegistry, type RegistryEntry, type RegistryKind, type RegistrySource } from "./content/registry";
+import { fetchRegisteredDataset, fetchRegistry, type RegisteredDatasetManifest, type RegistryEntry, type RegistryKindFilter, type RegistrySource } from "./content/registry";
 import type { AttachedFile, ExecutionResult, Kernel, KernelKind, StructuredResult } from "./kernel/protocol";
 import { DesktopKernel, desktopAvailable } from "./kernel/desktop-client";
 import { SomerKernel } from "./kernel/somer-client";
 import { WasmKernel } from "./kernel/wasm-client";
 import { directives, executableSource, parseNotebook, serializeNotebook, type NotebookCell } from "./notebook/format";
 import { hasDataset, prepareDataset, removeDataset, saveWorkspace, sha256 } from "./storage/content-store";
+import { RegistryWorkspace, type RegistryViewState } from "./registry/RegistryWorkspace";
 
 type Cell = NotebookCell & { result?: ExecutionResult; editing?: boolean };
 type Notice = { tone: "info" | "good" | "bad"; text: string } | null;
+type WorkspaceView = "notebook" | "registry";
+
+const DEFAULT_REGISTRY_FILTERS: RegistryViewState = {
+  query: "", kind: "all", category: "", runtime: "", access: "all", verification: "all", sort: "relevance"
+};
+
+function registryStateFromUrl(): { view: WorkspaceView; filters: RegistryViewState; entry: string } {
+  const params = new URL(location.href).searchParams;
+  const kinds = new Set<RegistryKindFilter>(["all", "lesson", "dataset", "provider", "package", "workflow", "tool"]);
+  const kind = params.get("kind") as RegistryKindFilter | null;
+  return {
+    view: params.get("view") === "registry" ? "registry" : "notebook",
+    filters: {
+      query: params.get("q") ?? "", kind: kind && kinds.has(kind) ? kind : "all",
+      category: params.get("category") ?? "", runtime: params.get("runtime") ?? "",
+      access: (["public", "registration", "controlled"].includes(params.get("access") ?? "") ? params.get("access") : "all") as RegistryViewState["access"],
+      verification: (["verified", "preview"].includes(params.get("trust") ?? "") ? params.get("trust") : "all") as RegistryViewState["verification"],
+      sort: (["recent", "name", "size"].includes(params.get("sort") ?? "") ? params.get("sort") : "relevance") as RegistryViewState["sort"],
+    },
+    entry: params.get("entry") ?? "",
+  };
+}
 
 const SAMPLE = `# Start here
 
@@ -37,6 +60,18 @@ function displayBytes(bytes: number) {
   return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
 }
 
+function registryEntryKey(entry: RegistryEntry) {
+  return `${entry.id}@${entry.version}`;
+}
+
+function asDatasetManifest(manifest: RegisteredDatasetManifest, file: RegisteredDatasetManifest["files"][number]): DatasetManifest {
+  return {
+    id: `${manifest.id}:${file.id}`, title: file.title, path: file.path, url: file.url, bytes: file.bytes,
+    sha256: file.sha256, mediaType: file.mediaType, source: manifest.source.landingPage,
+    citation: manifest.source.citation, rights: manifest.source.rights
+  };
+}
+
 function ResultView({ result }: { result?: ExecutionResult }) {
   if (!result) return null;
   return <div className={`result ${result.ok ? "result-ok" : "result-error"}`}>
@@ -58,6 +93,7 @@ function StructuredView({ result }: { result: StructuredResult }) {
 }
 
 export default function App() {
+  const initialRegistryState = useRef(registryStateFromUrl()).current;
   const kernelRef = useRef<Kernel | null>(null);
   const attachedRef = useRef(new Map<string, AttachedFile>());
   const needsResetRef = useRef(false);
@@ -80,12 +116,17 @@ export default function App() {
   const [remoteToken, setRemoteToken] = useState("");
   const [packageOpen, setPackageOpen] = useState(false);
   const [packageUrl, setPackageUrl] = useState("");
+  const [workspaceView, setWorkspaceView] = useState<WorkspaceView>(initialRegistryState.view);
   const [registryEntries, setRegistryEntries] = useState<RegistryEntry[]>([]);
   const [registrySource, setRegistrySource] = useState<RegistrySource | "loading" | "unavailable">("loading");
   const [registryError, setRegistryError] = useState("");
   const [installingId, setInstallingId] = useState("");
-  const [registryQuery, setRegistryQuery] = useState("");
-  const [registryKind, setRegistryKind] = useState<RegistryKind>("lesson");
+  const [registryFilters, setRegistryFilters] = useState<RegistryViewState>(initialRegistryState.filters);
+  const [selectedRegistryKey, setSelectedRegistryKey] = useState(initialRegistryState.entry);
+  const [registryDatasetDetails, setRegistryDatasetDetails] = useState<RegisteredDatasetManifest | null>(null);
+  const [registryDetailLoading, setRegistryDetailLoading] = useState(false);
+  const [registryDetailError, setRegistryDetailError] = useState("");
+  const [preparedRegistryDatasets, setPreparedRegistryDatasets] = useState<Set<string>>(() => new Set());
 
   useEffect(() => {
     fetch("./catalog/index.json").then(response => response.json()).then((builtIn: CatalogEntry[]) => {
@@ -95,6 +136,33 @@ export default function App() {
   }, []);
 
   useEffect(() => { void refreshRegistry(); }, []);
+
+  useEffect(() => {
+    const restoreLocation = () => {
+      const state = registryStateFromUrl();
+      setWorkspaceView(state.view); setRegistryFilters(state.filters); setSelectedRegistryKey(state.entry);
+    };
+    addEventListener("popstate", restoreLocation);
+    return () => removeEventListener("popstate", restoreLocation);
+  }, []);
+
+  useEffect(() => {
+    const url = new URL(location.href);
+    const keys = ["view", "q", "kind", "category", "runtime", "access", "trust", "sort", "entry"];
+    keys.forEach(key => url.searchParams.delete(key));
+    if (workspaceView === "registry") {
+      url.searchParams.set("view", "registry");
+      if (registryFilters.query) url.searchParams.set("q", registryFilters.query);
+      if (registryFilters.kind !== "all") url.searchParams.set("kind", registryFilters.kind);
+      if (registryFilters.category) url.searchParams.set("category", registryFilters.category);
+      if (registryFilters.runtime) url.searchParams.set("runtime", registryFilters.runtime);
+      if (registryFilters.access !== "all") url.searchParams.set("access", registryFilters.access);
+      if (registryFilters.verification !== "all") url.searchParams.set("trust", registryFilters.verification);
+      if (registryFilters.sort !== "relevance") url.searchParams.set("sort", registryFilters.sort);
+      if (selectedRegistryKey) url.searchParams.set("entry", selectedRegistryKey);
+    }
+    history.replaceState(history.state, "", url);
+  }, [workspaceView, registryFilters, selectedRegistryKey]);
 
   useEffect(() => {
     let alive = true;
@@ -113,12 +181,57 @@ export default function App() {
   }, [cells, filename]);
 
   const codeCount = useMemo(() => cells.filter(cell => cell.type === "code").length, [cells]);
-  const discoverable = useMemo(() => searchRegistry(registryEntries, registryQuery, registryKind)
-    .filter(entry => entry.kind !== "lesson" || !catalog.some(item => item.id === entry.name)), [registryEntries, registryQuery, registryKind, catalog]);
+  const installedLessonNames = useMemo(() => new Set(catalog.map(item => item.id)), [catalog]);
+  const selectedRegistryEntry = useMemo(() => registryEntries.find(entry => registryEntryKey(entry) === selectedRegistryKey) ?? null, [registryEntries, selectedRegistryKey]);
+
+  useEffect(() => {
+    let active = true;
+    setRegistryDatasetDetails(null); setRegistryDetailError("");
+    if (selectedRegistryEntry?.kind !== "dataset") { setRegistryDetailLoading(false); return () => { active = false; }; }
+    setRegistryDetailLoading(true);
+    fetchRegisteredDataset(selectedRegistryEntry).then(async manifest => {
+      if (!active) return;
+      setRegistryDatasetDetails(manifest);
+      const cached = await Promise.all(manifest.files.map(file => hasDataset(asDatasetManifest(manifest, file))));
+      if (active && cached.every(Boolean)) setPreparedRegistryDatasets(current => new Set(current).add(manifest.id));
+    }).catch(error => active && setRegistryDetailError(error instanceof Error ? error.message : String(error)))
+      .finally(() => active && setRegistryDetailLoading(false));
+    return () => { active = false; };
+  }, [selectedRegistryEntry]);
 
   function updateCell(index: number, patch: Partial<Cell>) {
     setCells(current => current.map((cell, position) => position === index ? { ...cell, ...patch } : cell));
     if (patch.source !== undefined) { needsResetRef.current = true; setValidThrough(current => Math.min(current, index - 1)); }
+  }
+
+  function navigateWorkspace(view: WorkspaceView) {
+    const url = new URL(location.href);
+    if (view === "registry") url.searchParams.set("view", "registry");
+    else ["view", "q", "kind", "category", "runtime", "access", "trust", "sort", "entry"].forEach(key => url.searchParams.delete(key));
+    history.pushState(history.state, "", url); setWorkspaceView(view);
+    if (view === "registry" && notice?.text === "Run any code cell; required earlier cells run automatically.") setNotice(null);
+  }
+
+  function updateRegistryFilters(patch: Partial<RegistryViewState>) {
+    setRegistryFilters(current => ({ ...current, ...patch }));
+  }
+
+  function selectRegistryEntry(entry: RegistryEntry) {
+    setSelectedRegistryKey(registryEntryKey(entry));
+  }
+
+  async function openRegistryLesson(entry: RegistryEntry) {
+    const installed = catalog.find(item => item.id === entry.name);
+    if (!installed) return;
+    await loadLesson(installed); navigateWorkspace("notebook");
+  }
+
+  async function copyRegistryCommand(entry: RegistryEntry) {
+    const command = `bl data fetch ${entry.id}`;
+    try {
+      await navigator.clipboard.writeText(command);
+      setNotice({ tone: "good", text: `Copied: ${command}` });
+    } catch { setNotice({ tone: "info", text: command }); }
   }
 
   async function refreshVariables() {
@@ -250,15 +363,16 @@ export default function App() {
     try {
       const manifest = await installFromManifest(entry.manifest, entry.manifestSha256, entry.name);
       setNotice({ tone: "good", text: `${manifest.title} was checksum-verified and installed. Its data remains unprepared until you request it.` });
+      navigateWorkspace("notebook");
     } catch (error) { setNotice({ tone: "bad", text: error instanceof Error ? error.message : String(error) }); }
     finally { setInstallingId(""); }
   }
 
-  async function prepareRegistryDataset(entry: RegistryEntry) {
+  async function prepareRegistryDataset(entry: RegistryEntry, existingManifest?: RegisteredDatasetManifest) {
     if (!kernelRef.current) return;
     setInstallingId(entry.id);
     try {
-      const manifest = await fetchRegisteredDataset(entry);
+      const manifest = existingManifest ?? await fetchRegisteredDataset(entry);
       if (manifest.provider !== "oriclabs/direct-https") throw new Error(`Provider '${manifest.provider}' needs a Studio adapter that is not installed.`);
       if (manifest.access.kind === "controlled") throw new Error("Controlled-access data must be prepared by BioLang Desktop or SOMER with credentials kept outside the registry.");
       if (manifest.access.requiresAcceptance && !window.confirm(`Review and accept the source terms for ${manifest.title}${manifest.access.termsUrl ? `:\n${manifest.access.termsUrl}` : ""}`)) return;
@@ -267,16 +381,13 @@ export default function App() {
       for (const declared of manifest.files) {
         if (!declared.mediaType.startsWith("text/") && declared.mediaType !== "application/json") throw new Error(`${declared.title} is binary. Prepare it with bl data fetch or a native/remote kernel.`);
         const key = `${entry.id}:${declared.id}`;
-        const dataset: DatasetManifest = {
-          id: key, title: declared.title, path: declared.path, url: declared.url, bytes: declared.bytes,
-          sha256: declared.sha256, mediaType: declared.mediaType, source: manifest.source.landingPage,
-          citation: manifest.source.citation, rights: manifest.source.rights
-        };
+        const dataset = asDatasetManifest(manifest, declared);
         setNotice({ tone: "info", text: `Downloading ${declared.title} from ${manifest.provider}…` });
         const file = await prepareDataset(dataset, loaded => setProgress(current => ({ ...current, [key]: loaded })));
         attachedRef.current.set(file.path, file); await kernelRef.current.attach(file);
         setDataReady(current => ({ ...current, [key]: true }));
       }
+      setPreparedRegistryDatasets(current => new Set(current).add(entry.id));
       setNotice({ tone: "good", text: `${manifest.title} was checksum-verified, cached, and attached. Use the declared file paths in this notebook.` });
     } catch (error) { setNotice({ tone: "bad", text: error instanceof Error ? error.message : String(error) }); }
     finally { setInstallingId(""); }
@@ -317,13 +428,17 @@ export default function App() {
     setCells(current => [...current, { id: crypto.randomUUID(), type, source: type === "code" ? "# BioLang code" : "Write what this step answers.", editing: true, status: "" }]);
   }
 
-  return <div className="app-shell">
+  return <div className={`app-shell ${workspaceView === "registry" ? "registry-mode" : ""}`}>
     <header className="topbar">
       <div className="brand"><img src="./studio-mark.svg" alt=""/><div><strong>BioLang Studio</strong><small>learn · analyse · reproduce</small></div></div>
+      <nav className="workspace-tabs" aria-label="Studio workspace">
+        <button className={workspaceView === "notebook" ? "active" : ""} onClick={() => navigateWorkspace("notebook")}>Notebook</button>
+        <button className={workspaceView === "registry" ? "active" : ""} onClick={() => navigateWorkspace("registry")}>Registry</button>
+      </nav>
       <nav className="toolbar">
-        <button onClick={() => notebookInput.current?.click()}>Open</button><button onClick={saveFile}>Save</button>
-        <button className="primary" disabled={running} onClick={() => void runTo(cells.length - 1, true)}>▶ Run all</button>
-        {running && <button onClick={() => void kernelRef.current?.cancel()}>Stop</button>}
+        {workspaceView === "notebook" ? <><button onClick={() => notebookInput.current?.click()}>Open</button><button onClick={saveFile}>Save</button>
+          <button className="primary" disabled={running} onClick={() => void runTo(cells.length - 1, true)}>▶ Run all</button>
+          {running && <button onClick={() => void kernelRef.current?.cancel()}>Stop</button>}</> : <button onClick={() => void refreshRegistry()}>Refresh registry</button>}
       </nav>
       <div className="kernel-switch">
         <label>Kernel<select value={kernelKind} onChange={event => event.target.value === "somer" ? setRemoteOpen(true) : setKernelKind(event.target.value as KernelKind)}>
@@ -331,23 +446,16 @@ export default function App() {
         </select></label><span className={`status status-${kernelState}`}>{kernelState}</span>
       </div>
     </header>
-    <aside className="sidebar">
-      <section className="discover"><div className="section-head"><h2>Discover</h2><button title="Refresh lesson registry" onClick={() => void refreshRegistry()}>↻</button></div>
-        {registrySource === "loading" ? <p className="muted">Checking the lesson registry…</p> : registrySource === "unavailable" ? <div className="registry-message"><p>Registry unavailable.</p><span title={registryError}>You can still open installed lessons or add a manifest URL.</span></div> : <>
-          <div className="registry-state"><a href={DEFAULT_REGISTRY_URL} target="_blank" rel="noreferrer">Official registry</a><span>{registrySource === "cache" ? "offline cache" : "live"}</span></div>
-          <div className="registry-filter"><input aria-label="Registry search" value={registryQuery} onChange={event => setRegistryQuery(event.target.value)} placeholder="Search registry"/><select aria-label="Registry kind" value={registryKind} onChange={event => setRegistryKind(event.target.value as RegistryKind)}><option value="lesson">Lessons</option><option value="dataset">Datasets</option><option value="provider">Providers</option><option value="package">Packages</option><option value="workflow">Workflows</option><option value="tool">Tools</option></select></div>
-          {discoverable.length ? discoverable.map(entry => <div className="registry-entry" key={`${entry.id}@${entry.version}`}>
-            <div className="registry-title"><strong>{entry.title}</strong><span className={`trust-badge ${entry.verified ? "verified" : "preview"}`}>{entry.verified ? "Verified" : entry.status}</span></div>
-            <p>{entry.summary}</p><div className="registry-categories">{entry.categories.map(category => <span key={category}>{category}</span>)}</div><div className="registry-meta"><span>{entry.publisher} · v{entry.version} · {entry.kind === "dataset" && entry.dataset ? displayBytes(entry.dataset.totalBytes) : entry.licence}</span>{entry.kind === "lesson" ? <button disabled={installingId === entry.id} aria-label={`Install ${entry.title}`} onClick={() => void installRegistryEntry(entry)}>{installingId === entry.id ? "Checking…" : "Install"}</button> : entry.kind === "dataset" ? <button disabled={installingId === entry.id} aria-label={`Prepare ${entry.title}`} onClick={() => void prepareRegistryDataset(entry)}>{installingId === entry.id ? "Checking…" : "Prepare"}</button> : entry.kind === "provider" && entry.provider ? <a href={entry.provider.apiDocumentation} target="_blank" rel="noreferrer">API docs</a> : null}</div>
-          </div>) : <p className="muted">No registry entries matched.</p>}
-        </>}
+    {workspaceView === "notebook" && <aside className="sidebar">
+      <section className="discover"><div className="section-head"><h2>Discover</h2><button title="Refresh registry" onClick={() => void refreshRegistry()}>↻</button></div>
+        <div className="discover-summary"><strong>{registrySource === "loading" ? "Checking registry…" : registrySource === "unavailable" ? "Registry unavailable" : `${registryEntries.length} registered item${registryEntries.length === 1 ? "" : "s"}`}</strong><span>{registrySource === "cache" ? "Using the verified offline cache." : "Browse lessons, datasets, workflows and tools."}</span><button onClick={() => navigateWorkspace("registry")}>Browse registry</button></div>
       </section>
       <section><div className="section-head"><h2>Installed lessons</h2><button title="Add lesson package" onClick={() => setPackageOpen(true)}>＋</button></div>{catalog.length ? catalog.map(item => <div className={`lesson-row ${lesson?.id === item.id ? "active" : ""}`} key={item.id}><button className="lesson-link" onClick={() => void loadLesson(item)}><strong>{item.title}</strong><span>{item.summary}</span></button><button className="remove-package" title={`Remove ${item.title}`} onClick={() => void removePackage(item)}>×</button></div>) : <div className="empty-catalog"><p>No lesson packages installed.</p><button onClick={() => setPackageOpen(true)}>Add from manifest URL</button></div>}</section>
       <section><h2>Data</h2>{lesson ? lesson.datasets.map(dataset => <div className="dataset" key={dataset.id}><div><strong>{dataset.title}</strong><span>{displayBytes(dataset.bytes)} · verified download</span></div><button disabled={dataReady[dataset.id]} onClick={() => void prepare(dataset.id)}>{dataReady[dataset.id] ? "Ready" : progress[dataset.id] ? `${Math.round(progress[dataset.id] / dataset.bytes * 100)}%` : "Prepare"}</button></div>) : <p className="muted">A lesson declares the exact data it needs.</p>}
         <button className="wide" onClick={() => fileInput.current?.click()}>Attach local files</button></section>
       <section><h2>Variables</h2>{variables.length ? <pre className="variables">{JSON.stringify(variables, null, 2)}</pre> : <p className="muted">Run code to inspect values in memory.</p>}</section>
-    </aside>
-    <main>
+    </aside>}
+    {workspaceView === "notebook" ? <main>
       <div className="document-head"><div><input aria-label="Notebook name" value={filename} onChange={event => setFilename(event.target.value)} /><span>{cells.length} cells · {codeCount} runnable</span></div>{lesson && <a href={lesson.source.url} target="_blank" rel="noreferrer">Inspired by {lesson.source.title} ↗</a>}</div>
       {notice && <div className={`notice notice-${notice.tone}`}>{notice.text}</div>}
       <div className="cells">{cells.map((cell, index) => <article className={`cell cell-${cell.type} ${cell.status ?? ""}`} key={cell.id}>
@@ -359,7 +467,7 @@ export default function App() {
         <div className="cell-actions"><button title="Move up" disabled={index === 0} onClick={() => { needsResetRef.current = true; setValidThrough(-1); setCells(current => current.map((item, position) => position === index - 1 ? current[index] : position === index ? current[index - 1] : item)); }}>↑</button><button title="Delete" onClick={() => { needsResetRef.current = true; setValidThrough(-1); setCells(current => current.filter((_, position) => position !== index)); }}>×</button></div>
       </article>)}</div>
       <div className="add-cells"><button onClick={() => addCell("code")}>+ Code</button><button onClick={() => addCell("markdown")}>+ Explanation</button></div>
-    </main>
+    </main> : <RegistryWorkspace entries={registryEntries} source={registrySource} error={registryError} filters={registryFilters} selectedKey={selectedRegistryKey} installedLessons={installedLessonNames} preparedDatasets={preparedRegistryDatasets} installingId={installingId} datasetDetails={registryDatasetDetails} detailLoading={registryDetailLoading} detailError={registryDetailError} notice={notice} onFiltersChange={updateRegistryFilters} onSelect={selectRegistryEntry} onRefresh={() => void refreshRegistry()} onInstall={entry => void installRegistryEntry(entry)} onOpenLesson={entry => void openRegistryLesson(entry)} onPrepare={(entry, details) => void prepareRegistryDataset(entry, details)} onCopyCommand={entry => void copyRegistryCommand(entry)}/>}
     <input hidden ref={fileInput} type="file" multiple onChange={event => void attachFiles(event.target.files).catch(error => setNotice({ tone: "bad", text: error.message }))}/>
     <input hidden ref={notebookInput} type="file" accept=".bln,.md,.bl.md" onChange={event => void openFile(event.target.files?.[0])}/>
     {remoteOpen && <div className="modal-backdrop"><form className="modal" onSubmit={event => { event.preventDefault(); setKernelKind("somer"); setRemoteOpen(false); }}><h2>Connect to SOMER</h2><p>The token stays in memory and is never saved by Studio.</p><label>Server URL<input required type="url" value={remoteUrl} onChange={event => setRemoteUrl(event.target.value)} placeholder="https://compute.example.org" /></label><label>Bearer token<input required type="password" value={remoteToken} onChange={event => setRemoteToken(event.target.value)} /></label><div><button type="button" onClick={() => setRemoteOpen(false)}>Cancel</button><button className="primary" type="submit">Connect</button></div></form></div>}
