@@ -1,7 +1,14 @@
-export const DEFAULT_REGISTRY_URL = "https://registry.lang.bio/v1/index.json";
+import { isAllowedContentUrl, isLoopbackUrl } from "./url-policy";
+
+const PUBLIC_REGISTRY_URL = "https://registry.lang.bio/v1/index.json";
 export const FALLBACK_REGISTRY_URL = "https://raw.githubusercontent.com/oriclabs/biolang-registry/main/registry/v1/index.json";
+const configuredRegistryUrl = import.meta.env.VITE_BIOLANG_REGISTRY_URL?.trim();
+const LOCAL_DEVELOPMENT_REGISTRY_URL = "/__biolang/registry/v1/index.json";
+export const DEFAULT_REGISTRY_URL = configuredRegistryUrl || (import.meta.env.DEV ? LOCAL_DEVELOPMENT_REGISTRY_URL : PUBLIC_REGISTRY_URL);
+export const REGISTRY_URLS = [...new Set([DEFAULT_REGISTRY_URL, ...(configuredRegistryUrl ? [PUBLIC_REGISTRY_URL] : []), FALLBACK_REGISTRY_URL])];
 
 const CACHE_KEY = "biolang-studio:registry:v1";
+const CACHE_SOURCE_KEY = `${CACHE_KEY}:source`;
 const KINDS = new Set(["lesson", "package", "workflow", "tool", "dataset", "provider"]);
 const STATUSES = new Set(["preview", "stable", "deprecated", "withdrawn"]);
 const RUNTIMES = new Set(["browser", "desktop", "somer", "cli"]);
@@ -82,7 +89,7 @@ export interface RegisteredDatasetManifest {
 }
 
 export interface RegistryIndex { schema: 1; entries: RegistryEntry[] }
-export type RegistrySource = "network" | "fallback" | "cache";
+export type RegistrySource = "local" | "network" | "fallback" | "cache";
 export type RegistryKindFilter = RegistryKind | "all";
 export type RegistryAccessFilter = "all" | "public" | "registration" | "controlled";
 export type RegistryVerificationFilter = "all" | "verified" | "preview";
@@ -98,11 +105,7 @@ export interface RegistryFilters {
   sort?: RegistrySort;
 }
 
-function isHttps(value: unknown): value is string {
-  return typeof value === "string" && value.startsWith("https://");
-}
-
-function validateEntry(value: unknown): RegistryEntry {
+function validateEntry(value: unknown, allowLoopback = false): RegistryEntry {
   if (!value || typeof value !== "object") throw new Error("Registry contains a non-object entry.");
   const entry = value as Partial<RegistryEntry>;
   if (entry.schema !== 1 || !entry.kind || !KINDS.has(entry.kind) ||
@@ -111,14 +114,14 @@ function validateEntry(value: unknown): RegistryEntry {
       !entry.title || typeof entry.summary !== "string" ||
       !entry.version || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(entry.version) ||
       !entry.status || !STATUSES.has(entry.status) || typeof entry.verified !== "boolean" ||
-      !isHttps(entry.manifest) || !/^[a-f0-9]{64}$/.test(entry.manifestSha256 ?? "") ||
+      !isAllowedContentUrl(entry.manifest, allowLoopback) || !/^[a-f0-9]{64}$/.test(entry.manifestSha256 ?? "") ||
       !/^\d{4}-\d{2}-\d{2}$/.test(entry.publishedAt ?? "") ||
       !entry.compatibility || !Array.isArray(entry.compatibility.runtimes) || !entry.compatibility.runtimes.length ||
       entry.compatibility.runtimes.some(runtime => !RUNTIMES.has(runtime)) ||
       !Array.isArray(entry.categories) || !entry.categories.length || !Array.isArray(entry.tags) ||
-      !isHttps(entry.sourceRepository) || !entry.licence || !entry.validation ||
+      !isAllowedContentUrl(entry.sourceRepository) || !entry.licence || !entry.validation ||
       (entry.kind === "dataset" && (!entry.dataset || !entry.dataset.provider || !Number.isSafeInteger(entry.dataset.totalBytes) || entry.dataset.totalBytes < 1)) ||
-      (entry.kind === "provider" && (!entry.provider || !entry.provider.adapter || !isHttps(entry.provider.apiDocumentation)))) {
+      (entry.kind === "provider" && (!entry.provider || !entry.provider.adapter || !isAllowedContentUrl(entry.provider.apiDocumentation)))) {
     throw new Error(`Registry entry '${entry.id ?? "unknown"}' is invalid.`);
   }
   return entry as RegistryEntry;
@@ -170,12 +173,12 @@ export function validateRegisteredDatasetManifest(value: unknown, entry?: Regist
       !manifest.title || !manifest.description || !Array.isArray(manifest.categories) || !Array.isArray(manifest.tags) ||
       !Array.isArray(manifest.modalities) || !Array.isArray(manifest.organisms) || !manifest.provider ||
       !manifest.access || !["public", "registration", "controlled"].includes(manifest.access.kind ?? "") ||
-      !manifest.source || !isHttps(manifest.source.landingPage) || !manifest.source.citation || !manifest.source.licence || !manifest.source.rights ||
+      !manifest.source || !isAllowedContentUrl(manifest.source.landingPage) || !manifest.source.citation || !manifest.source.licence || !manifest.source.rights ||
       !Array.isArray(manifest.files) || !manifest.files.length) throw new Error("Dataset manifest is missing required schema-1 fields.");
   const paths = new Set<string>(); const ids = new Set<string>();
   for (const file of manifest.files) {
     if (!file.id || ids.has(file.id) || !file.path || paths.has(file.path) || file.path.startsWith("/") || file.path.split(/[\\/]/).includes("..") ||
-        !isHttps(file.url) || !Number.isSafeInteger(file.bytes) || file.bytes < 1 || !/^[a-f0-9]{64}$/.test(file.sha256) ||
+        !isAllowedContentUrl(file.url) || !Number.isSafeInteger(file.bytes) || file.bytes < 1 || !/^[a-f0-9]{64}$/.test(file.sha256) ||
         !file.mediaType || !file.format || !file.role || !/^[a-z_][a-z0-9_]*$/.test(file.reader)) throw new Error(`Dataset file '${file.id || "unknown"}' is invalid.`);
     ids.add(file.id); paths.add(file.path);
   }
@@ -205,32 +208,42 @@ export async function fetchRegisteredDataset(entry: RegistryEntry): Promise<Regi
   return validateRegisteredDatasetManifest(value, entry);
 }
 
-export function validateRegistry(value: unknown): RegistryIndex {
+export function validateRegistry(value: unknown, options: { allowLoopback?: boolean } = {}): RegistryIndex {
   if (!value || typeof value !== "object") throw new Error("Registry index must be an object.");
   const index = value as Partial<RegistryIndex>;
   if (index.schema !== 1 || !Array.isArray(index.entries)) throw new Error("Registry index is not schema 1.");
-  const entries = index.entries.map(validateEntry);
+  const entries = index.entries.map(entry => validateEntry(entry, options.allowLoopback));
   const identities = entries.map(entry => `${entry.id}@${entry.version}`);
   if (new Set(identities).size !== identities.length) throw new Error("Registry contains a duplicate entry version.");
   return { schema: 1, entries };
 }
 
-export async function fetchRegistry(urls: string[] = [DEFAULT_REGISTRY_URL, FALLBACK_REGISTRY_URL]): Promise<{ index: RegistryIndex; source: RegistrySource }> {
+export async function fetchRegistry(urls: string[] = REGISTRY_URLS): Promise<{ index: RegistryIndex; source: RegistrySource }> {
   let networkError: unknown = new Error("Registry is unavailable.");
   for (const [index, url] of urls.entries()) {
     try {
-      const response = await fetch(url, { credentials: "omit", referrerPolicy: "no-referrer", cache: "no-cache" });
+      const resolvedUrl = new URL(url, location.href);
+      if (!isAllowedContentUrl(resolvedUrl.href, isLoopbackUrl(resolvedUrl))) throw new Error("Registry URLs must use HTTPS (HTTP loopback URLs are allowed for local development).");
+      const response = await fetch(resolvedUrl, { credentials: "omit", referrerPolicy: "no-referrer", cache: "no-cache" });
       if (!response.ok) throw new Error(`Registry returned HTTP ${response.status}.`);
       const text = await response.text();
-      const registry = validateRegistry(JSON.parse(text));
+      const local = isLoopbackUrl(resolvedUrl);
+      const registry = validateRegistry(JSON.parse(text), { allowLoopback: local });
       localStorage.setItem(CACHE_KEY, text);
-      return { index: registry, source: index === 0 ? "network" : "fallback" };
+      localStorage.setItem(CACHE_SOURCE_KEY, resolvedUrl.href);
+      return { index: registry, source: local ? "local" : resolvedUrl.href === FALLBACK_REGISTRY_URL ? "fallback" : "network" };
     } catch (error) { networkError = error; }
   }
   const cached = localStorage.getItem(CACHE_KEY);
   if (cached) {
-    try { return { index: validateRegistry(JSON.parse(cached)), source: "cache" }; }
-    catch { localStorage.removeItem(CACHE_KEY); }
+    try {
+      const cachedSource = localStorage.getItem(CACHE_SOURCE_KEY) ?? "";
+      const allowLoopback = isLoopbackUrl(cachedSource) && urls.some(url => isLoopbackUrl(new URL(url, location.href)));
+      return { index: validateRegistry(JSON.parse(cached), { allowLoopback }), source: "cache" };
+    } catch {
+      localStorage.removeItem(CACHE_KEY);
+      localStorage.removeItem(CACHE_SOURCE_KEY);
+    }
   }
   throw networkError;
 }

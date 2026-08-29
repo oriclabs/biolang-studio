@@ -9,19 +9,128 @@ test.beforeEach(async ({ page }) => {
   await page.route(REGISTRY_FALLBACK, route => route.fulfill({ json: { schema: 1, entries: [] } }));
 });
 
+test("creates an editable task-first statistics notebook", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Guided stats" }).click();
+  await expect(page.getByRole("heading", { name: "New guided statistics notebook" })).toBeVisible();
+  await page.getByLabel("Question").selectOption("paired");
+  await page.getByLabel("Attached CSV path").fill("patient-measurements.csv");
+  await page.getByLabel("Columns, in the stated order").fill("baseline,followup");
+  await page.getByRole("button", { name: "Create notebook" }).click();
+  await expect(page.getByLabel("Notebook name")).toHaveValue("compare-matched-measurements.bln");
+  await expect(page.locator("textarea.code-editor").first()).toContainText('read_csv("patient-measurements.csv")');
+  await expect(page.locator("textarea.code-editor").nth(1)).toContainText('stat.paired_change(data["baseline"], data["followup"], {method: "paired_t"})');
+});
+
 test("runs prerequisite cells in the isolated WASM kernel", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByText("BioLang Studio")).toBeVisible();
   await expect(page.locator(".status")).toHaveText("ready", { timeout: 30_000 });
-  await page.locator("article.cell-code").nth(1).getByTitle("Run this cell and any prerequisites").click();
+  await page.locator("article.cell-code").nth(1).getByRole("button", { name: /Run cell/ }).click();
   await expect(page.locator("article.cell-code").nth(1).locator(".result")).toContainText("15", { timeout: 30_000 });
+  const result = page.locator("article.cell-code").nth(1).locator(".result");
+  await expect(result.getByRole("button", { name: "Table" })).toHaveAttribute("aria-pressed", "true");
+  await expect(result.getByRole("row", { name: /mean 17/ })).toBeVisible();
+  await result.getByRole("button", { name: "JSON" }).click();
+  await expect(result.locator("pre")).toContainText('"median": 15');
   await expect(page.getByText(/Earlier code cells were run when needed/)).toBeVisible();
+  await expect(page.getByText(/2 runnable · all current/)).toBeVisible();
+  await expect(page.getByRole("button", { name: "Run again cell 4" })).toBeVisible();
+  const firstCode = page.locator("article.cell-code").first().locator("textarea.code-editor");
+  await firstCode.fill(`${await firstCode.inputValue()} `);
+  await expect(page.getByRole("button", { name: "Rerun required cell 2" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Rerun required cell 4" })).toBeVisible();
+  await expect(page.getByText(/2 runnable · 0 current/)).toBeVisible();
+});
+
+test("keeps BioLang operators literal and opens external lesson links separately", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "+ Explanation" }).click();
+  const editor = page.locator("textarea.markdown-editor").last();
+  await editor.fill("Use `values |> summary()` and read [the reference](https://example.org/reference).");
+  await editor.blur();
+  const rendered = page.locator("article.cell-markdown").last();
+  await expect(rendered.getByRole("link", { name: "the reference" })).toHaveAttribute("target", "_blank");
+  await expect(rendered.getByRole("link", { name: "the reference" })).toHaveAttribute("rel", "noopener noreferrer");
+  expect(await rendered.locator("code").evaluate(element => getComputedStyle(element).fontVariantLigatures)).toContain("none");
+  await expect(rendered.locator("code")).toHaveText("values |> summary()");
+});
+
+test("exports notebook reports as HTML and Markdown bundles", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.locator(".status")).toHaveText("ready", { timeout: 30_000 });
+  await page.locator("article.cell-code").last().getByRole("button", { name: /Run cell/ }).click();
+  await expect(page.getByText(/Finished through cell/)).toBeVisible();
+
+  await page.getByRole("button", { name: "Export", exact: true }).click();
+  const htmlEvent = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Export HTML" }).click();
+  const htmlDownload = await htmlEvent;
+  expect(htmlDownload.suggestedFilename()).toMatch(/\.html$/);
+  const htmlStream = await htmlDownload.createReadStream(); const htmlChunks: Buffer[] = [];
+  for await (const chunk of htmlStream) htmlChunks.push(Buffer.from(chunk));
+  const html = Buffer.concat(htmlChunks).toString("utf8");
+  expect(html).toContain("<!doctype html>");
+  expect(html).toContain("font-variant-ligatures:none");
+  expect(html).not.toContain('<script src=');
+
+  await page.getByRole("button", { name: "Export", exact: true }).click();
+  await page.getByRole("radio", { name: /Markdown bundle/ }).check();
+  const markdownEvent = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Export Markdown ZIP" }).click();
+  const markdownDownload = await markdownEvent;
+  expect(markdownDownload.suggestedFilename()).toMatch(/-markdown\.zip$/);
+});
+
+test("renders plots responsively with resize and export actions", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.locator(".status")).toHaveText("ready", { timeout: 30_000 });
+  await page.getByRole("button", { name: "+ Code" }).click();
+  const cell = page.locator("article.cell-code").last();
+  await cell.locator("textarea.code-editor").fill('histogram([18, 19, 20, 21, 22, 24, 27, 31], {bins: 4, format: "svg", title: "Responsive BMI"})');
+  await cell.getByRole("button", { name: /Run cell/ }).click();
+  const plot = cell.locator(".plot-view");
+  await expect(plot.locator('iframe[title="BioLang plot"]')).toBeVisible({ timeout: 30_000 });
+  await expect(plot.getByRole("button", { name: "Expand" })).toBeVisible();
+  await expect(plot.getByRole("button", { name: "Export SVG" })).toBeVisible();
+  await expect(plot.getByRole("button", { name: "Save PNG" })).toBeVisible();
+  expect(await plot.locator(".plot-inline").evaluate(element => getComputedStyle(element).resize)).toBe("vertical");
+  const frame = page.frameLocator('iframe[title="BioLang plot"]');
+  expect(await frame.locator("body").evaluate(body => body.scrollWidth <= body.clientWidth && body.scrollHeight <= body.clientHeight)).toBe(true);
+  const svgDownload = page.waitForEvent("download");
+  await plot.getByRole("button", { name: "Export SVG" }).click();
+  expect((await svgDownload).suggestedFilename()).toBe("biolang-plot.svg");
+  const pngDownload = page.waitForEvent("download");
+  await plot.getByRole("button", { name: "Save PNG" }).click();
+  expect((await pngDownload).suggestedFilename()).toBe("biolang-plot.png");
+  await plot.getByRole("button", { name: "Expand" }).click();
+  await expect(page.getByRole("dialog", { name: "Expanded plot" })).toBeVisible();
+  await page.getByRole("button", { name: "Close expanded plot" }).click();
+});
+
+test("stops at an inline error and offers retry or delete", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.locator(".status")).toHaveText("ready", { timeout: 30_000 });
+  await page.getByRole("button", { name: "New", exact: true }).click();
+  await page.getByRole("button", { name: "+ Code" }).click();
+  await page.getByRole("button", { name: "+ Code" }).click();
+  const code = page.locator("article.cell-code");
+  await code.nth(0).locator("textarea.code-editor").fill("does_not_exist()");
+  await code.nth(1).locator("textarea.code-editor").fill("let should_not_run = 42");
+  await code.nth(1).getByRole("button", { name: /Run cell/ }).click();
+  await expect(code.nth(0).locator(".result-error")).toHaveAttribute("role", "alert");
+  await expect(code.nth(0).getByRole("button", { name: "Retry cell 2" })).toBeVisible();
+  await expect(code.nth(1).locator(".result")).toHaveCount(0);
+  await expect(page.getByText(/Stopped at cell 2/)).toBeVisible();
+  page.once("dialog", dialog => dialog.accept());
+  await code.nth(0).getByRole("button", { name: "Delete cell 2" }).click();
+  await expect(page.locator("article.cell-code")).toHaveCount(1);
 });
 
 test("exports a backend-disclosed, checksum-pinned run record", async ({ page }) => {
   await page.goto("/");
   await expect(page.locator(".status")).toHaveText("ready", { timeout: 30_000 });
-  await page.locator("article.cell-code").first().getByTitle("Run this cell and any prerequisites").click();
+  await page.locator("article.cell-code").first().getByRole("button", { name: /Run cell/ }).click();
   await expect(page.getByText(/Finished through cell/)).toBeVisible();
 
   await page.getByText("Workspace", { exact: true }).click();
@@ -96,7 +205,7 @@ test("cancels native execution and namespaces kernel disposal across notebook ta
   await expect(page.locator(".status")).toHaveText("ready", { timeout: 30_000 });
   await page.locator(".kernel-switch select").selectOption("desktop");
   await expect(page.locator(".status")).toHaveText("ready", { timeout: 30_000 });
-  await page.locator("article.cell-code").first().getByTitle("Run this cell and any prerequisites").click();
+  await page.locator("article.cell-code").first().getByRole("button", { name: /Run cell/ }).click();
   await expect(page.getByRole("button", { name: "Stop" })).toBeVisible();
   await page.getByRole("button", { name: "Stop" }).click();
   await expect(page.getByText(/next run will replay this notebook/)).toBeVisible();
@@ -117,7 +226,7 @@ test("inspects variables in bounded pages and exports a small value", async ({ p
   const longValue = "A".repeat(300);
   const cell = page.locator("article.cell-code").first();
   await cell.locator("textarea.code-editor").fill(`let many = [${values}]\nlet exact = ["${longValue}"]`);
-  await cell.getByTitle("Run this cell and any prerequisites").click();
+  await cell.getByRole("button", { name: /Run cell/ }).click();
 
   await page.locator("details.variables-disclosure > summary").click();
   const variable = page.locator(".variable-item").filter({ hasText: "many" });
@@ -163,7 +272,7 @@ test("authors, runs, and collapses an optional lesson step", async ({ page }) =>
 test("keeps notebook variables isolated while sharing an explicit data attachment", async ({ page }) => {
   await page.goto("/");
   await expect(page.locator(".status")).toHaveText("ready", { timeout: 30_000 });
-  await page.locator("article.cell-code").first().getByTitle("Run this cell and any prerequisites").click();
+  await page.locator("article.cell-code").first().getByRole("button", { name: /Run cell/ }).click();
   await expect(page.locator("details.variables-disclosure summary small")).not.toHaveText("0");
 
   await page.locator('input[type="file"][multiple]').setInputFiles({ name: "shared.csv", mimeType: "text/csv", buffer: Buffer.from("x\n1\n") });
@@ -179,7 +288,7 @@ test("keeps notebook variables isolated while sharing an explicit data attachmen
 
   await page.getByRole("button", { name: "+ Code" }).click();
   await page.locator("textarea.code-editor").last().fill("measurements");
-  await page.locator("article.cell-code").last().getByTitle("Run this cell and any prerequisites").click();
+  await page.locator("article.cell-code").last().getByRole("button", { name: /Run cell/ }).click();
   await expect(page.locator("article.cell-code").last().locator(".result-error")).toContainText(/measurements|variable/i);
 
   await page.waitForTimeout(1_000);
@@ -191,7 +300,7 @@ test("keeps notebook variables isolated while sharing an explicit data attachmen
 test("publishes a checksum-pinned output for a later notebook", async ({ page }) => {
   await page.goto("/");
   await expect(page.locator(".status")).toHaveText("ready", { timeout: 30_000 });
-  await page.locator("article.cell-code").first().getByTitle("Run this cell and any prerequisites").click();
+  await page.locator("article.cell-code").first().getByRole("button", { name: /Run cell/ }).click();
   await expect(page.locator("details.variables-disclosure summary small")).not.toHaveText("0");
   await page.locator("details.variables-disclosure > summary").click();
   const variable = page.locator(".variable-item").filter({ hasText: "measurements" });
@@ -334,12 +443,45 @@ test("adds and removes an external lesson package on demand", async ({ page }) =
   await page.getByRole("button", { name: "Add lesson", exact: true }).click();
   await expect(page.getByRole("button", { name: /External demo/ })).toBeVisible();
   await expect(page.locator('input[aria-label="Notebook name"]')).toHaveValue("external-demo.bln");
-  await page.getByRole("button", { name: "Prepare" }).click();
+  await expect(page.getByText("Prepare data before running", { exact: true })).toBeVisible();
+  await expect(page.locator(".status")).toHaveText("ready", { timeout: 30_000 });
+  await page.locator("article.cell-code").getByRole("button", { name: /Run cell/ }).click();
+  await expect(page.getByText(/Prepare the lesson data before running/)).toBeVisible();
+  await expect(page.locator("article.cell-code .result")).toHaveCount(0);
+  await page.getByRole("button", { name: /Prepare & run all/ }).click();
   await expect(page.getByRole("button", { name: "Ready" })).toBeVisible();
-  await page.locator("article.cell-code").getByTitle("Run this cell and any prerequisites").click();
   await expect(page.locator("article.cell-code .result")).toContainText("2");
   await page.getByTitle("Remove External demo").click();
   await expect(page.getByText("No lesson packages installed.")).toBeVisible();
+});
+
+test("opens and removes an ordered lesson collection as notebook tabs", async ({ page }) => {
+  await page.route("https://lessons.example.test/biomedical/lesson.json", route => route.fulfill({
+    json: {
+      schema: 2, id: "biomedical-series", title: "Biomedical series", summary: "Two connected lessons.",
+      runtime: "browser", estimatedMemoryMb: 2,
+      source: { title: "CC BY source", url: "https://lessons.example.test/source", note: "Adapted" },
+      datasets: [], tags: ["statistics"],
+      lessons: [
+        { id: "risk", title: "Risk", summary: "Compare risks.", entry: "01-risk.bln" },
+        { id: "trials", title: "Trials", summary: "Plan trials.", entry: "02-trials.bln" },
+      ],
+    },
+  }));
+  await page.route("https://lessons.example.test/biomedical/01-risk.bln", route => route.fulfill({ contentType: "text/plain", body: "# Risk\n\n```biolang\n1 + 1\n```\n" }));
+  await page.route("https://lessons.example.test/biomedical/02-trials.bln", route => route.fulfill({ contentType: "text/plain", body: "# Trials\n\n```biolang\n2 + 2\n```\n" }));
+  await page.goto("/");
+  await page.getByRole("button", { name: "Add from manifest URL" }).click();
+  await page.getByLabel("Manifest URL").fill("https://lessons.example.test/biomedical/lesson.json");
+  await page.getByRole("button", { name: "Add lesson", exact: true }).click();
+  await expect(page.getByRole("tab", { name: "risk.bln" })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "trials.bln" })).toBeVisible();
+  await expect(page.getByText(/Biomedical series was added as 2 ordered notebook tabs/)).toBeVisible();
+  await page.getByTitle("Remove Biomedical series").click();
+  await expect(page.getByText("No lesson packages installed.")).toBeVisible();
+  await expect(page.getByRole("tab", { name: "risk.bln" })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "trials.bln" })).toBeVisible();
+  await expect(page.getByRole("link", { name: /Inspired by CC BY source/ })).toHaveCount(0);
 });
 
 test("discovers, verifies, runs, and removes a registry lesson", async ({ page }) => {
@@ -381,9 +523,9 @@ test("discovers, verifies, runs, and removes a registry lesson", async ({ page }
   await page.getByRole("button", { name: "Install Registry demo" }).click();
   await expect(page.getByText(/checksum-verified and installed/)).toBeVisible();
   await expect(page.locator('input[aria-label="Notebook name"]')).toHaveValue("registry-demo.bln");
-  await page.getByRole("button", { name: "Prepare" }).click();
+  await page.getByRole("button", { name: "Prepare", exact: true }).click();
   await expect(page.getByRole("button", { name: "Ready" })).toBeVisible();
-  await page.locator("article.cell-code").getByTitle("Run this cell and any prerequisites").click();
+  await page.locator("article.cell-code").getByRole("button", { name: /Run cell/ }).click();
   await expect(page.locator("article.cell-code .result")).toContainText("2");
   await page.getByTitle("Remove Registry demo").click();
   await page.getByRole("button", { name: "Registry", exact: true }).click();

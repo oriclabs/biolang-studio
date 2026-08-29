@@ -66,6 +66,7 @@ function displayBytes(bytes: number) {
 }
 
 function sourceLabel(source: RegistryWorkspaceProps["source"]) {
+  if (source === "local") return "local registry";
   if (source === "network") return "registry.lang.bio";
   if (source === "fallback") return "GitHub fallback";
   if (source === "cache") return "offline cache";

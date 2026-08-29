@@ -53,6 +53,20 @@ npm run test:studio-stress
 - Confirm the recent-files menu opens the saved files and forgets a missing
   file cleanly.
 
+## Notebook reports
+
+- Run a notebook containing prose, a table and an SVG plot, then export
+  self-contained HTML. Open it offline and confirm no raw dataset or credential
+  bytes are embedded.
+- Export the Markdown ZIP and confirm `report.md`, SVG figures, `run.json` and
+  `manifest.json` open independently.
+- Open the print-ready view, use **Save as PDF**, and inspect every page for
+  clipped code, split tables or plots, and missing provenance.
+- Confirm an unrun, stale or failed cell is disclosed before export and in the
+  resulting report.
+- Confirm `|>` remains two literal characters in code and report output, and
+  HTTP(S) links open in a new tab.
+
 ## Installer and clean machine
 
 - Build the release bundle with `npm run studio:build`.
@@ -62,6 +76,8 @@ npm run test:studio-stress
 - Confirm Browser mode starts and runs a notebook without extra tools.
 - Confirm Desktop mode remains an explicit choice and gives a clear message if
   `bl.exe` is not installed or discoverable.
+- Confirm Desktop mode rejects an older `bl.exe` that lacks the
+  `export-variable` console capability, with an upgrade or `BIOLANG_BIN` hint.
 - Install BioLang, repeat Desktop execution, import a local file, export a
   variable, and verify the output checksum.
 - Uninstall Studio and confirm user notebooks outside application storage are

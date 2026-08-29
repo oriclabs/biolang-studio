@@ -1,0 +1,33 @@
+.statistics-guide-modal {
+  width: min(560px, calc(100vw - 30px));
+}
+
+.statistics-guide-modal select {
+  display: block;
+  width: 100%;
+  padding: 8px;
+  margin-top: 4px;
+  border: 1px solid #cbd4d0;
+  border-radius: 6px;
+  background: #fff;
+}
+
+.statistics-guide-modal .guide-question {
+  padding: 9px 11px;
+  border-left: 3px solid #dba23d;
+  background: #faf5e8;
+  color: #3d4c48;
+}
+
+.statistics-guide-modal .guide-error {
+  color: #8c3636;
+  background: #fae4e0;
+  padding: 8px;
+  border-radius: 6px;
+}
+
+.statistics-guide-modal .modal-guidance {
+  font-size: 12px;
+  color: #687772;
+  line-height: 1.45;
+}

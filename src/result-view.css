@@ -1,0 +1,63 @@
+.data-preflight {
+  width: 100%;
+  margin: 0 0 11px;
+  padding: 12px 14px;
+  border: 1px solid #f0c36a;
+  border-radius: 9px;
+  background: #fff8e7;
+  color: #614714;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.data-preflight > div { min-width: 0; flex: 1; }
+.data-preflight strong, .data-preflight span { display: block; }
+.data-preflight span { margin-top: 3px; font-size: 12px; line-height: 1.45; }
+.data-preflight button { flex: 0 0 auto; white-space: nowrap; border-radius: 7px; padding: 7px 11px; }
+.dataset.needs-prepare { border-color: #e7c982; background: #fffdf7; }
+
+.structured-output { position: relative; padding-top: 30px; }
+.result-view-switch { position: absolute; top: 0; right: 0; display: flex; padding: 2px; border: 1px solid #d7dfdb; border-radius: 6px; background: #f4f7f5; }
+.result-view-switch button { border: 0; border-radius: 4px; padding: 3px 8px; background: transparent; color: #687570; font-size: 11px; }
+.result-view-switch button.active { background: #fff; color: #263b36; box-shadow: 0 1px 2px rgb(0 0 0 / 10%); font-weight: 700; }
+.key-value-table th[scope="row"] { width: 38%; color: #53625e; font-weight: 600; }
+.result-preview-note, .table-wrap > p { margin: 7px 0 0; color: #6b7874; font-size: 11px; }
+
+/* BioLang operators must remain literal: some programming fonts turn |> into a triangle. */
+.code-editor, .result pre, .prose code {
+  font-variant-ligatures: none;
+  font-feature-settings: "liga" 0, "calt" 0;
+}
+
+.cell-rail em { display: block; margin-top: 3px; overflow: hidden; color: #7b8884; font-size: 8px; font-style: normal; line-height: 1.05; text-overflow: ellipsis; }
+.cell.done { border-color: #a9d3bd; }
+.cell.done .cell-rail { background: #edf8f2; color: #167052; }
+.cell.done .cell-rail button { color: #167052; }
+.cell.stale { border-color: #e4c478; }
+.cell.stale .cell-rail { background: #fff8e6; color: #8b6517; }
+.cell.stale .cell-rail button { color: #8b6517; }
+.cell.error .cell-rail { background: #fff0ed; color: #a24235; }
+.cell.error .cell-rail button { color: #a24235; }
+.cell.running .cell-rail button { color: #b8750d; animation: cell-running-spin 1s linear infinite; }
+@keyframes cell-running-spin { to { transform: rotate(360deg); } }
+
+.plot-view { position: relative; width: 100%; min-width: 0; padding-top: 32px; }
+.plot-toolbar { position: absolute; z-index: 1; top: 0; right: 0; display: flex; gap: 4px; }
+.plot-toolbar button, .plot-lightbox-head button { border: 1px solid #d3dcd7; border-radius: 6px; padding: 4px 8px; background: #fff; color: #40514c; font-size: 11px; }
+.plot-inline { position: relative; width: 100%; min-width: 0; min-height: 220px; max-height: 80vh; overflow: hidden; resize: vertical; border: 1px solid #e1e7e3; border-radius: 8px; background: #fff; }
+.plot-inline::after { content: ""; position: absolute; right: 4px; bottom: 4px; width: 9px; height: 9px; pointer-events: none; border-right: 2px solid #82908b; border-bottom: 2px solid #82908b; }
+.plot-view .plot-frame { display: block; width: 100%; height: 100%; min-height: 0; border: 0; overflow: hidden; background: #fff; }
+.plot-export-error { margin: 6px 0 0; color: #a24235; font-size: 11px; }
+.plot-lightbox { position: fixed; z-index: 50; inset: 0; display: grid; place-items: center; padding: 24px; background: rgb(8 18 16 / 78%); }
+.plot-lightbox-panel { width: min(1400px, 96vw); height: min(900px, 92vh); display: grid; grid-template-rows: 42px minmax(0, 1fr); overflow: hidden; border-radius: 12px; background: #fff; box-shadow: 0 24px 80px rgb(0 0 0 / 35%); }
+.plot-lightbox-head { display: flex; align-items: center; justify-content: space-between; padding: 7px 10px 7px 14px; border-bottom: 1px solid #e1e7e3; color: #40514c; font-size: 12px; font-weight: 700; }
+.plot-lightbox .plot-frame { width: 100%; height: 100%; border: 0; }
+
+@media (max-width: 800px) {
+  .data-preflight { align-items: stretch; flex-direction: column; }
+  .data-preflight button { width: 100%; }
+  .plot-lightbox { padding: 8px; }
+  .plot-lightbox-panel { width: 100%; height: 96vh; }
+}

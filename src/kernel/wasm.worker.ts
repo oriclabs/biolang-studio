@@ -12,6 +12,7 @@ type WasmModule = {
 
 const files = new Map<string, string>();
 let runtime: WasmModule | null = null;
+let runtimeBase = "";
 
 // wasm-bindgen currently imports the file bridge from `window`. A worker has no
 // Window object, so expose the worker global under that name before loading WASM.
@@ -28,9 +29,10 @@ let runtime: WasmModule | null = null;
 
 async function loadRuntime() {
   if (runtime) return runtime;
-  const runtimeUrl = new URL("../runtime/bl_wasm.js", self.location.href).href;
+  if (!runtimeBase) throw new Error("The browser runtime location was not initialized.");
+  const runtimeUrl = new URL("bl_wasm.js", runtimeBase).href;
   const module = await import(/* @vite-ignore */ runtimeUrl) as WasmModule;
-  await module.default(new URL("../runtime/bl_wasm_bg.wasm", self.location.href));
+  await module.default(new URL("bl_wasm_bg.wasm", runtimeBase));
   module.init();
   runtime = module;
   return module;
@@ -43,6 +45,7 @@ function attach(file: AttachedFile) {
 }
 
 async function handle(request: WorkerRequest): Promise<unknown> {
+  if (request.method === "initialize") runtimeBase = request.runtimeBase;
   const wasm = await loadRuntime();
   switch (request.method) {
     case "initialize":
@@ -55,7 +58,8 @@ async function handle(request: WorkerRequest): Promise<unknown> {
       const started = performance.now();
       const result = JSON.parse(wasm.evaluate(request.source)) as ExecutionResult & { structured?: unknown };
       if (!result.ok && /operation not supported|cannot open/i.test(result.error ?? "")) {
-        result.error = `${result.error}\nAttached browser files: ${[...new Set(files.keys())].join(", ") || "none"}`;
+        const attached = [...new Set(files.keys())];
+        result.error = `${result.error}\nAttached browser files: ${attached.join(", ") || "none"}${attached.length ? "" : "\nHint: open Data and choose Prepare for lesson data, or Attach for your own file."}`;
       }
       if (result.structured && !result.results?.length) result.results = [result.structured as never];
       result.elapsedMs = Math.round((performance.now() - started) * 10) / 10;

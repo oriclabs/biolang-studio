@@ -133,7 +133,7 @@ export interface Kernel {
 }
 
 export type WorkerRequest =
-  | { id: number; method: "initialize" }
+  | { id: number; method: "initialize"; runtimeBase: string }
   | { id: number; method: "execute"; source: string }
   | { id: number; method: "reset" }
   | { id: number; method: "clearFiles" }

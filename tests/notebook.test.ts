@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { directives, executableSource, expandMixedMarkdown, parseNotebook, serializeNotebook, type NotebookCell } from "../src/notebook/format";
-import { validateManifest } from "../src/content/manifest";
+import { manifestLessonEntries, validateManifest } from "../src/content/manifest";
 import { filterRegistry, searchRegistry, validateRegisteredDatasetManifest, validateRegistry, type RegistryEntry } from "../src/content/registry";
 import { assertUnambiguousMountPaths, attachmentId, migratePortableWorkspace, validatePortableWorkspace, WORKSPACE_SCHEMA_URL, type WorkspaceAttachment } from "../src/workspace/format";
 
@@ -32,11 +32,58 @@ describe("BioLang notebook format", () => {
 });
 
 describe("content manifests", () => {
+  it("accepts an ordered schema-2 lesson collection", () => {
+    const manifest = validateManifest({
+      schema: 2, id: "biomedical-series", title: "Biomedical series", summary: "A sequence of lessons.",
+      runtime: "browser", estimatedMemoryMb: 2,
+      source: { title: "Open source", url: "https://example.test/source", note: "Adapted" },
+      datasets: [], tags: ["statistics"],
+      lessons: [
+        { id: "risk", title: "Risk", summary: "Compare risks.", entry: "01-risk.bln" },
+        { id: "trials", title: "Trials", summary: "Plan trials.", entry: "02-trials.bln" },
+      ],
+    });
+    expect(manifestLessonEntries(manifest).map(lesson => lesson.id)).toEqual(["risk", "trials"]);
+  });
+  it("rejects duplicate or escaping collection entries", () => {
+    expect(() => validateManifest({
+      schema: 2, id: "bad", title: "Bad", summary: "Bad collection", runtime: "browser", estimatedMemoryMb: 1,
+      source: { title: "Source", url: "https://example.test", note: "Test" }, datasets: [], tags: [],
+      lessons: [
+        { id: "same", title: "One", summary: "", entry: "../one.bln" },
+        { id: "same", title: "Two", summary: "", entry: "../one.bln" },
+      ],
+    })).toThrow();
+  });
   it("rejects unverified or insecure datasets", () => {
     expect(() => validateManifest({ schema: 1, id: "x", title: "x", entry: "x.bln", tags: [], datasets: [{ id: "d", path: "d", url: "http://example.test/d", sha256: "bad", bytes: 1 }] })).toThrow();
   });
+  it("allows loopback lesson sources only when local development is explicit", () => {
+    const local = {
+      schema: 1, id: "local", title: "Local", summary: "Local lesson", entry: "lesson.bln",
+      runtime: "browser", estimatedMemoryMb: 1,
+      source: { title: "Local source", url: "http://127.0.0.1:4310/source", note: "Development" },
+      datasets: [{ id: "tiny", title: "Tiny", path: "tiny.csv", url: "http://localhost:4310/tiny.csv",
+        bytes: 1, sha256: "a".repeat(64), mediaType: "text/csv", source: "Local", citation: "Local", rights: "Local" }],
+      tags: ["local"]
+    };
+    expect(() => validateManifest(local)).toThrow();
+    expect(validateManifest(local, { allowLoopback: true }).id).toBe("local");
+    expect(() => validateManifest({ ...local, source: { ...local.source, url: "http://example.test/source" } }, { allowLoopback: true })).toThrow();
+  });
   it("rejects registry entries without a pinned manifest checksum", () => {
     expect(() => validateRegistry({ schema: 1, entries: [{ schema: 1, kind: "lesson", id: "test/demo", publisher: "test", name: "demo", manifest: "https://example.test/lesson.json", manifestSha256: "bad" }] })).toThrow();
+  });
+  it("allows loopback manifests only in an explicitly local registry", () => {
+    const entry = {
+      schema: 1, kind: "lesson", id: "test/local", publisher: "test", name: "local", title: "Local lesson",
+      summary: "Development lesson", version: "0.1.0", status: "preview", verified: false,
+      manifest: "http://127.0.0.1:4310/lesson.json", manifestSha256: "a".repeat(64), publishedAt: "2026-08-29",
+      compatibility: { runtimes: ["browser"] }, categories: ["teaching"], tags: ["local"],
+      sourceRepository: "https://github.com/example/local", licence: "MIT", validation: "local"
+    };
+    expect(() => validateRegistry({ schema: 1, entries: [entry] })).toThrow();
+    expect(validateRegistry({ schema: 1, entries: [entry] }, { allowLoopback: true }).entries[0].manifest).toBe(entry.manifest);
   });
   it("searches dataset discovery metadata and categories", () => {
     const entry = {

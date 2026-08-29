@@ -1,7 +1,7 @@
 import type { AttachedFile, ExecutionResult, Kernel, KernelCapabilities, VariableExport, VariableExportFormat, VariablePage, VariableSummary, WorkerRequest, WorkerResponse } from "./protocol";
 
 type WorkerCall =
-  | { method: "initialize" }
+  | { method: "initialize"; runtimeBase: string }
   | { method: "execute"; source: string }
   | { method: "reset" }
   | { method: "clearFiles" }
@@ -50,7 +50,8 @@ export class WasmKernel implements Kernel {
   }
 
   async initialize() {
-    const capabilities = await this.call<KernelCapabilities>({ method: "initialize" });
+    const runtimeBase = new URL("./runtime/", document.baseURI).href;
+    const capabilities = await this.call<KernelCapabilities>({ method: "initialize", runtimeBase });
     for (const file of this.attached.values()) await this.call({ method: "attach", file });
     return capabilities;
   }

@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { CatalogEntry, DatasetManifest, LessonManifest } from "./content/manifest";
-import { validateManifest } from "./content/manifest";
+import { manifestLessonEntries, validateManifest } from "./content/manifest";
+import { isLoopbackUrl } from "./content/url-policy";
 import { installLesson, installedLessons, uninstallLesson } from "./content/installed";
 import { fetchRegisteredDataset, fetchRegistry, type RegisteredDatasetManifest, type RegistryEntry, type RegistryKindFilter, type RegistrySource } from "./content/registry";
 import type { AttachedFile, ExecutionResult, Kernel, KernelKind, NativeFileReference, RuntimeInfo, StructuredResult, VariableExportFormat, VariableSummary } from "./kernel/protocol";
@@ -15,9 +16,19 @@ import { cacheAttachment, clearContentCache, hasDataset, loadAttachment, loadWor
 import { RegistryWorkspace, type RegistryViewState } from "./registry/RegistryWorkspace";
 import { assertUnambiguousMountPaths, attachmentId, isSafeWorkspacePath, migratePortableWorkspace, WORKSPACE_SCHEMA_URL, type PortableWorkspace, type WorkspaceAttachment } from "./workspace/format";
 import { VariableInspector } from "./VariableInspector";
+import { StatisticsGuideDialog } from "./StatisticsGuideDialog";
+import { PlotView } from "./PlotView";
+import { ExportNotebookDialog } from "./ExportNotebookDialog";
+import { reportIssues, type NotebookReport, type ReportFormat, type ReportOptions } from "./export/model";
 
 type Cell = NotebookCell & { result?: ExecutionResult; editing?: boolean };
 type Notice = { tone: "info" | "good" | "bad"; text: string } | null;
+const MARKDOWN_COMPONENTS: Components = {
+  a: ({ href, children, ...props }) => {
+    const external = /^https?:\/\//i.test(href ?? "");
+    return <a href={href} {...props} {...(external ? { target: "_blank", rel: "noopener noreferrer" } : {})}>{children}</a>;
+  },
+};
 type WorkspaceView = "notebook" | "registry";
 type DisplayBlock = { key: string; step?: NonNullable<NotebookCell["step"]>; items: Array<{ cell: Cell; index: number }> };
 type RunRecord = {
@@ -141,7 +152,7 @@ function asDatasetManifest(manifest: RegisteredDatasetManifest, file: Registered
 
 function ResultView({ result }: { result?: ExecutionResult }) {
   if (!result) return null;
-  return <div className={`result ${result.ok ? "result-ok" : "result-error"}`}>
+  return <div className={`result ${result.ok ? "result-ok" : "result-error"}`} role={result.ok ? undefined : "alert"}>
     <div className="result-meta"><span>{result.backend ?? "kernel"}</span><span>{result.elapsedMs ?? 0} ms</span></div>
     {result.output && <pre className="stdout">{result.output}</pre>}
     {!result.ok && <pre className="error-text">{result.error}</pre>}
@@ -150,13 +161,44 @@ function ResultView({ result }: { result?: ExecutionResult }) {
   </div>;
 }
 
+function readableValue(value: unknown) {
+  if (value === null || value === undefined) return "—";
+  if (typeof value === "boolean") return value ? "Yes" : "No";
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
+function ValueTable({ value }: { value: unknown }) {
+  if (Array.isArray(value)) {
+    const records = value.filter(item => item && typeof item === "object" && !Array.isArray(item)) as Array<Record<string, unknown>>;
+    if (records.length === value.length && records.length > 0) {
+      const columns = [...new Set(records.flatMap(record => Object.keys(record)))];
+      return <div className="table-wrap"><table><thead><tr>{columns.map(column => <th key={column}>{column}</th>)}</tr></thead><tbody>{records.slice(0, 100).map((record, row) => <tr key={row}>{columns.map(column => <td key={column}>{readableValue(record[column])}</td>)}</tr>)}</tbody></table>{records.length > 100 && <p>Showing the first 100 of {records.length} rows.</p>}</div>;
+    }
+    return <div className="table-wrap"><table><thead><tr><th>#</th><th>Value</th></tr></thead><tbody>{value.slice(0, 100).map((item, index) => <tr key={index}><td>{index + 1}</td><td>{readableValue(item)}</td></tr>)}</tbody></table>{value.length > 100 && <p>Showing the first 100 of {value.length} values.</p>}</div>;
+  }
+  if (value && typeof value === "object") {
+    return <div className="table-wrap key-value-table"><table><thead><tr><th>Measure</th><th>Value</th></tr></thead><tbody>{Object.entries(value).map(([key, item]) => <tr key={key}><th scope="row">{key.replaceAll("_", " ")}</th><td>{readableValue(item)}</td></tr>)}</tbody></table></div>;
+  }
+  return <pre>{readableValue(value)}</pre>;
+}
+
 function StructuredView({ result }: { result: StructuredResult }) {
+  const [view, setView] = useState<"table" | "json">("table");
   const markup = typeof result.data === "string" ? result.data : typeof result.value === "string" ? result.value : "";
   if ((result.kind === "plot" || result.format === "svg") && markup.includes("<svg")) {
-    return <iframe title="BioLang plot" className="plot-frame" sandbox="" srcDoc={`<!doctype html><style>body{margin:0;background:white}svg{display:block;width:100%;height:auto}</style>${markup}`} />;
+    return <PlotView markup={markup} />;
   }
-  if (result.columns && result.rows) return <div className="table-wrap"><table><thead><tr>{result.columns.map(column => <th key={column}>{column}</th>)}</tr></thead><tbody>{result.rows.slice(0, 100).map((row, index) => <tr key={index}>{row.map((value, cell) => <td key={cell}>{String(value ?? "")}</td>)}</tr>)}</tbody></table>{result.truncated && <p>Showing a preview of {result.totalRows ?? "many"} rows.</p>}</div>;
-  return <pre>{JSON.stringify(result.value ?? result, null, 2)}</pre>;
+  const tabularValue = result.columns && result.rows
+    ? result.rows.map(row => Object.fromEntries(result.columns!.map((column, index) => [column, row[index]])))
+    : result.value ?? result;
+  const structured = tabularValue !== null && typeof tabularValue === "object";
+  if (!structured) return <pre>{readableValue(tabularValue)}</pre>;
+  return <div className="structured-output">
+    <div className="result-view-switch" aria-label="Result format"><button className={view === "table" ? "active" : ""} aria-pressed={view === "table"} onClick={() => setView("table")}>Table</button><button className={view === "json" ? "active" : ""} aria-pressed={view === "json"} onClick={() => setView("json")}>JSON</button></div>
+    {view === "table" ? <ValueTable value={tabularValue} /> : <pre>{JSON.stringify(tabularValue, null, 2)}</pre>}
+    {view === "table" && result.truncated && <p className="result-preview-note">Showing a preview of {result.totalRows ?? "many"} rows.</p>}
+  </div>;
 }
 
 export default function App() {
@@ -166,6 +208,7 @@ export default function App() {
   const fileStoreRef = useRef(new Map<string, AttachedFile>());
   const needsResetRef = useRef(false);
   const stopRequestedRef = useRef(false);
+  const runAfterPrepareRef = useRef(false);
   const sessionReadyRef = useRef(false);
   const fileInput = useRef<HTMLInputElement>(null);
   const notebookInput = useRef<HTMLInputElement>(null);
@@ -207,6 +250,9 @@ export default function App() {
   const [urlDataDownloading, setUrlDataDownloading] = useState(false);
   const [urlDataError, setUrlDataError] = useState("");
   const [packageOpen, setPackageOpen] = useState(false);
+  const [statisticsGuideOpen, setStatisticsGuideOpen] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
+  const [exportBusy, setExportBusy] = useState(false);
   const [packageUrl, setPackageUrl] = useState("");
   const [workspaceView, setWorkspaceView] = useState<WorkspaceView>(initialRegistryState.view);
   const [registryEntries, setRegistryEntries] = useState<RegistryEntry[]>([]);
@@ -222,6 +268,11 @@ export default function App() {
   const activeDocument = documents.find(document => document.id === activeDocumentId) ?? documents[0];
   const { cells, lesson, filename, validThrough, dataReady } = activeDocument;
   const visibleAttachments = useMemo(() => workspaceAttachments.filter(attachment => attachment.scope.kind === "workspace" || attachment.scope.notebookId === activeDocumentId), [workspaceAttachments, activeDocumentId]);
+  const visibleUserAttachments = useMemo(() => visibleAttachments.filter(attachment => {
+    if (attachment.source.kind !== "dataset") return true;
+    const datasetId = attachment.source.dataset.id;
+    return !lesson?.datasets.some(dataset => dataset.id === datasetId);
+  }), [visibleAttachments, lesson]);
   const currentWorkspaceText = useMemo(() => JSON.stringify(makePortableWorkspace(), null, 2), [documents, activeDocumentId, workspaceAttachments, workspaceName]);
   const workspaceDirty = Boolean(workspaceNativeFile && workspaceBaselineRef.current && workspaceBaselineRef.current !== currentWorkspaceText);
   const notebookChangedExternally = Boolean(activeDocument.nativeFile && externallyChangedPaths.has(activeDocument.nativeFile.path));
@@ -402,9 +453,22 @@ export default function App() {
   }, [activeDocumentId, documents, filename]);
 
   const codeCount = useMemo(() => cells.filter(cell => cell.type === "code").length, [cells]);
+  const currentCodeCount = useMemo(() => cells.filter(cell => cell.type === "code" && (cell.status === "done" || cell.status === "skipped")).length, [cells]);
   const displayBlocks = useMemo(() => groupNotebookCells(cells), [cells]);
+  const pendingLessonData = useMemo(() => lesson?.datasets.filter(dataset => !dataReady[dataset.id]) ?? [], [lesson, dataReady]);
   const installedLessonNames = useMemo(() => new Set(catalog.map(item => item.id)), [catalog]);
   const selectedRegistryEntry = useMemo(() => registryEntries.find(entry => registryEntryKey(entry) === selectedRegistryKey) ?? null, [registryEntries, selectedRegistryKey]);
+  const exportIssues = useMemo(() => reportIssues({
+    workspaceName, filename, generatedAt: "", cells,
+    missingData: lesson?.datasets.filter(dataset => !dataReady[dataset.id]).map(dataset => dataset.path) ?? [],
+    runRecord: activeDocument.lastRun,
+  }), [workspaceName, filename, cells, lesson, dataReady, activeDocument.lastRun]);
+
+  useEffect(() => {
+    if (!runAfterPrepareRef.current || pendingLessonData.length || running || kernelState !== "ready") return;
+    runAfterPrepareRef.current = false;
+    void runTo(cells.length - 1, true);
+  }, [pendingLessonData.length, running, kernelState, cells.length]);
 
   useEffect(() => {
     let active = true;
@@ -463,12 +527,16 @@ export default function App() {
   }
 
   function updateCell(index: number, patch: Partial<Cell>) {
+    const sourceChanged = patch.source !== undefined;
     updateDocument(activeDocumentId, document => ({
       ...document,
-      cells: document.cells.map((cell, position) => position === index ? { ...cell, ...patch } : cell),
-      dirty: patch.source !== undefined ? true : document.dirty,
+      cells: document.cells.map((cell, position) => {
+        const updated = position === index ? { ...cell, ...patch } : cell;
+        return sourceChanged && position >= index && updated.type === "code" && updated.result ? { ...updated, status: "stale" } : updated;
+      }),
+      dirty: sourceChanged ? true : document.dirty,
     }));
-    if (patch.source !== undefined) { needsResetRef.current = true; setValidThrough(current => Math.min(current, index - 1)); }
+    if (sourceChanged) { needsResetRef.current = true; setValidThrough(current => Math.min(current, index - 1)); }
   }
 
   function navigateWorkspace(view: WorkspaceView) {
@@ -508,6 +576,11 @@ export default function App() {
 
   async function runTo(end: number, restart = false) {
     if (!kernelRef.current || running || kernelState !== "ready") return;
+    if (pendingLessonData.length) {
+      const names = pendingLessonData.map(dataset => dataset.path).join(", ");
+      setNotice({ tone: "info", text: `Prepare the lesson data before running. BioLang cannot open ${names} until ${pendingLessonData.length === 1 ? "it is" : "they are"} downloaded, checksum-verified, and attached.` });
+      return;
+    }
     setRunning(true); setNotice(null);
     stopRequestedRef.current = false;
     const runStartedAt = new Date();
@@ -522,9 +595,13 @@ export default function App() {
     }));
     let runSucceeded = false;
     let runError: string | undefined;
+    let executingIndex = -1;
     let start = Math.max(0, validThrough + 1);
     try {
-      if (restart || needsResetRef.current || end <= validThrough || kernelKind === "somer") { await kernelRef.current.reset(); needsResetRef.current = false; start = 0; setValidThrough(-1); }
+      if (restart || needsResetRef.current || end <= validThrough || kernelKind === "somer") {
+        await kernelRef.current.reset(); needsResetRef.current = false; start = 0; setValidThrough(-1);
+        updateDocument(runNotebookId, document => ({ ...document, cells: document.cells.map(cell => cell.type === "code" && cell.result ? { ...cell, status: "stale" } : cell) }));
+      }
       if (kernelKind === "somer") {
         const runnable = cells.slice(0, end + 1).filter(cell => cell.type === "code" && !directives(cell.source).skip).map(cell => executableSource(cell.source)).filter(Boolean);
         const result = await kernelRef.current.execute(runnable.join("\n\n"));
@@ -539,17 +616,32 @@ export default function App() {
         const instruction = directives(cell.source);
         const source = executableSource(cell.source);
         if (instruction.skip || !source) { updateCell(index, { status: "skipped", result: undefined }); setValidThrough(index); continue; }
+        executingIndex = index;
         updateCell(index, { status: "running", result: undefined });
         const result = await kernelRef.current.execute(source);
         updateCell(index, { status: result.ok ? "done" : "error", result });
-        if (!result.ok) { runError = result.error ?? "Execution failed."; setValidThrough(index - 1); setNotice({ tone: "bad", text: `Stopped at cell ${index + 1}: ${runError}` }); return; }
+        if (!result.ok) {
+          runError = result.error ?? "Execution failed."; setValidThrough(index - 1);
+          updateDocument(runNotebookId, document => ({ ...document, cells: document.cells.map((item, position) => position > index && item.type === "code" && item.result ? { ...item, status: "stale" } : item) }));
+          setNotice({ tone: "bad", text: `Stopped at cell ${index + 1}: ${runError}` });
+          setTimeout(() => document.querySelector(`[data-cell-index="${index}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 0);
+          return;
+        }
         setValidThrough(index);
+        executingIndex = -1;
       }
       await refreshVariables();
       runSucceeded = true;
       setNotice({ tone: "good", text: `Finished through cell ${end + 1}. Earlier code cells were run when needed.` });
     } catch (error) {
       runError = stopRequestedRef.current ? "Cancelled by user" : error instanceof Error ? error.message : String(error);
+      if (stopRequestedRef.current) updateDocument(runNotebookId, document => ({ ...document, cells: document.cells.map(cell => cell.status === "running" ? { ...cell, status: "stale" } : cell) }));
+      else if (executingIndex >= 0) {
+        const failed: ExecutionResult = { ok: false, error: runError, backend: kernelKind };
+        updateDocument(runNotebookId, document => ({ ...document, cells: document.cells.map((item, position) => position === executingIndex ? { ...item, status: "error", result: failed } : position > executingIndex && item.type === "code" && item.result ? { ...item, status: "stale" } : item) }));
+        setValidThrough(executingIndex - 1);
+        setTimeout(() => document.querySelector(`[data-cell-index="${executingIndex}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 0);
+      }
       setNotice(stopRequestedRef.current
         ? { tone: "info", text: "Execution stopped. The next run will replay this notebook from a clean interpreter." }
         : { tone: "bad", text: runError });
@@ -598,22 +690,28 @@ export default function App() {
         const actual = await sha256(manifestText);
         if (actual.toLowerCase() !== entry.manifestSha256.toLowerCase()) throw new Error("The lesson manifest changed and no longer matches its installed registry checksum.");
       }
-      const manifest = validateManifest(JSON.parse(manifestText));
-      const sourceResponse = await fetch(new URL(manifest.entry, manifestUrl), { credentials: "omit", referrerPolicy: "no-referrer" });
-      if (!sourceResponse.ok) throw new Error(`Lesson notebook returned HTTP ${sourceResponse.status}.`);
-      const source = await sourceResponse.text();
-      const document = createNotebook(`${manifest.id}.bln`, source, manifest);
+      const manifest = validateManifest(JSON.parse(manifestText), { allowLoopback: isLoopbackUrl(manifestUrl) });
+      const lessonEntries = manifestLessonEntries(manifest);
+      const openedDocuments = await Promise.all(lessonEntries.map(async lessonEntry => {
+        const sourceResponse = await fetch(new URL(lessonEntry.entry, manifestUrl), { credentials: "omit", referrerPolicy: "no-referrer" });
+        if (!sourceResponse.ok) throw new Error(`${lessonEntry.title} returned HTTP ${sourceResponse.status}.`);
+        return createNotebook(`${lessonEntry.id}.bln`, await sourceResponse.text(), manifest);
+      }));
       const states = Object.fromEntries(await Promise.all(manifest.datasets.map(async dataset => {
         const cached = await hasDataset(dataset);
         if (cached) {
           const file = await prepareDataset(dataset);
-          await registerAttachment(file, dataset.mediaType, { kind: "dataset", dataset }, { kind: "notebook", notebookId: document.id }, false);
+          await Promise.all(openedDocuments.map(document => registerAttachment(
+            file, dataset.mediaType, { kind: "dataset", dataset }, { kind: "notebook", notebookId: document.id }, false,
+          )));
         }
         return [dataset.id, cached];
       })));
-      document.dataReady = states;
-      setDocuments(current => [...current, document]); setActiveDocumentId(document.id); needsResetRef.current = false;
-      setNotice({ tone: "info", text: `Opened ${manifest.title} in a new tab. Prepare its declared data before running.` });
+      for (const document of openedDocuments) document.dataReady = states;
+      setDocuments(current => [...current, ...openedDocuments]); setActiveDocumentId(openedDocuments[0].id); needsResetRef.current = false;
+      setNotice({ tone: "info", text: openedDocuments.length === 1
+        ? `Opened ${manifest.title} in a new tab. Prepare its declared data before running.`
+        : `Opened ${manifest.title} as ${openedDocuments.length} ordered notebook tabs.` });
     } catch (error) {
       setNotice({ tone: "bad", text: error instanceof Error ? error.message : String(error) });
       if (propagateError) throw error;
@@ -633,7 +731,7 @@ export default function App() {
 
   async function installFromManifest(rawUrl: string, expectedHash?: string, expectedId?: string) {
     const parsedUrl = new URL(rawUrl, location.href);
-    if (parsedUrl.protocol !== "https:" && !["localhost", "127.0.0.1"].includes(parsedUrl.hostname)) throw new Error("Lesson manifests must use HTTPS (localhost is allowed for development).");
+    if (parsedUrl.protocol !== "https:" && !(parsedUrl.protocol === "http:" && isLoopbackUrl(parsedUrl))) throw new Error("Lesson manifests must use HTTPS (HTTP loopback URLs are allowed for local development).");
     const manifestUrl = parsedUrl.href;
     const response = await fetch(manifestUrl, { credentials: "omit", referrerPolicy: "no-referrer" });
     if (!response.ok) throw new Error(`Lesson manifest returned HTTP ${response.status}.`);
@@ -645,7 +743,7 @@ export default function App() {
     let decoded: unknown;
     try { decoded = JSON.parse(manifestText); }
     catch { throw new Error("Lesson manifest is not valid JSON."); }
-    const manifest = validateManifest(decoded);
+    const manifest = validateManifest(decoded, { allowLoopback: isLoopbackUrl(parsedUrl) });
     if (expectedId && manifest.id !== expectedId) throw new Error(`Registry expected lesson '${expectedId}', but the manifest identifies '${manifest.id}'.`);
     const candidate: CatalogEntry = {
       id: manifest.id, title: manifest.title, summary: manifest.summary, manifest: manifestUrl,
@@ -657,9 +755,9 @@ export default function App() {
     return manifest;
   }
 
-  async function prepare(id: string) {
+  async function prepare(id: string): Promise<boolean> {
     const dataset = lesson?.datasets.find(item => item.id === id);
-    if (!dataset || !kernelRef.current) return;
+    if (!dataset || !kernelRef.current) return false;
     try {
       if (kernelKind === "browser" && dataset.bytes > 50 * 1024 ** 2) throw new Error(`${dataset.title} is larger than the 50 MB browser guidance limit. Use BioLang Desktop or SOMER for this lesson.`);
       if (kernelKind === "desktop" && kernelRef.current.fetchRemote) {
@@ -672,21 +770,40 @@ export default function App() {
         registerNativeReference(native, { kind: "dataset", dataset }, { kind: "notebook", notebookId: activeDocumentId });
         setDataReady(current => ({ ...current, [id]: true }));
         setNotice({ tone: "good", text: `${dataset.title} was streamed to private native storage, checksum-verified, and mounted as ${dataset.path}.` });
-        return;
+        return true;
       }
       setNotice({ tone: "info", text: `Downloading ${dataset.title} from its declared source…` });
       const file = await prepareDataset(dataset, loaded => setProgress(current => ({ ...current, [id]: loaded })));
       await registerAttachment(file, dataset.mediaType, { kind: "dataset", dataset }, { kind: "notebook", notebookId: activeDocumentId });
       setDataReady(current => ({ ...current, [id]: true }));
       setNotice({ tone: "good", text: `${dataset.title} is verified and ready as ${dataset.path}.` });
-    } catch (error) { setNotice({ tone: "bad", text: error instanceof Error ? error.message : String(error) }); }
+      return true;
+    } catch (error) { setNotice({ tone: "bad", text: error instanceof Error ? error.message : String(error) }); return false; }
+  }
+
+  async function prepareAllLessonData(): Promise<boolean> {
+    if (!pendingLessonData.length) return true;
+    setNotice({ tone: "info", text: `Preparing ${pendingLessonData.length} lesson file${pendingLessonData.length === 1 ? "" : "s"}. Each download is checksum-verified before BioLang can read it.` });
+    for (const dataset of pendingLessonData) {
+      if (!await prepare(dataset.id)) return false;
+    }
+    setNotice({ tone: "good", text: `${pendingLessonData.length} lesson file${pendingLessonData.length === 1 ? " is" : "s are"} prepared and attached. You can run the notebook now.` });
+    return true;
+  }
+
+  async function prepareAndRunAll() {
+    runAfterPrepareRef.current = true;
+    if (!await prepareAllLessonData()) runAfterPrepareRef.current = false;
   }
 
   async function addPackage() {
     try {
       const manifest = await installFromManifest(packageUrl);
+      const lessonCount = manifestLessonEntries(manifest).length;
       setPackageOpen(false); setPackageUrl("");
-      setNotice({ tone: "good", text: `${manifest.title} was added to this browser. Its data remains unprepared until you request it.` });
+      setNotice({ tone: "good", text: lessonCount === 1
+        ? `${manifest.title} was added to this browser. Its data remains unprepared until you request it.`
+        : `${manifest.title} was added as ${lessonCount} ordered notebook tabs. Its data remains unprepared until you request it.` });
     } catch (error) { setNotice({ tone: "bad", text: error instanceof Error ? error.message : String(error) }); }
   }
 
@@ -694,7 +811,10 @@ export default function App() {
     setInstallingId(entry.id);
     try {
       const manifest = await installFromManifest(entry.manifest, entry.manifestSha256, entry.name);
-      setNotice({ tone: "good", text: `${manifest.title} was checksum-verified and installed. Its data remains unprepared until you request it.` });
+      const lessonCount = manifestLessonEntries(manifest).length;
+      setNotice({ tone: "good", text: lessonCount === 1
+        ? `${manifest.title} was checksum-verified and installed. Its data remains unprepared until you request it.`
+        : `${manifest.title} was checksum-verified and installed as ${lessonCount} ordered notebook tabs. Its data remains unprepared until you request it.` });
       navigateWorkspace("notebook");
     } catch (error) { setNotice({ tone: "bad", text: error instanceof Error ? error.message : String(error) }); }
     finally { setInstallingId(""); }
@@ -1005,6 +1125,17 @@ export default function App() {
     setDocuments(current => [...current, document]); setActiveDocumentId(document.id); setWorkspaceView("notebook");
   }
 
+  function createGuidedStatisticsNotebook(title: string, source: string) {
+    const filename = `${title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "statistics-analysis"}.bln`;
+    const document = createNotebook(filename, source);
+    document.dirty = true;
+    setDocuments(current => [...current, document]);
+    setActiveDocumentId(document.id);
+    setWorkspaceView("notebook");
+    setStatisticsGuideOpen(false);
+    setNotice({ tone: "info", text: "Attach the named CSV, review the generated method, then run the notebook in order." });
+  }
+
   function switchNotebook(id: string) {
     if (id === activeDocumentId || running) return;
     needsResetRef.current = false; setCollapsedSteps(new Set()); setActiveDocumentId(id);
@@ -1077,6 +1208,34 @@ export default function App() {
     anchor.href = url; anchor.download = `${base}.run.json`; anchor.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
     setNotice({ tone: "good", text: `Exported the latest ${record.runtime.runtime} run record with source and input checksums.` });
+  }
+
+  async function exportNotebook(format: ReportFormat, options: ReportOptions) {
+    let printTarget: Window | null = null;
+    if (format === "pdf") {
+      printTarget = window.open("", "_blank");
+      if (!printTarget) { setNotice({ tone: "bad", text: "The print view was blocked. Allow pop-ups for Studio and try again." }); return; }
+      printTarget.document.write("<!doctype html><title>Preparing BioLang report</title><p style='font-family:system-ui;padding:2rem'>Preparing print view…</p>");
+    }
+    setExportBusy(true);
+    try {
+      const report: NotebookReport = {
+        workspaceName: workspaceName.trim() || "BioLang workspace", filename: filename.trim() || "untitled.bln",
+        generatedAt: new Date().toISOString(), cells,
+        ...(lesson ? { lesson: { title: lesson.title, sourceTitle: lesson.source.title, sourceUrl: lesson.source.url } } : {}),
+        missingData: lesson?.datasets.filter(dataset => !dataReady[dataset.id]).map(dataset => dataset.path) ?? [],
+        runRecord: activeDocument.lastRun,
+      };
+      const exporter = await import("./export/report");
+      if (format === "html") await exporter.exportHtml(report, options);
+      else if (format === "markdown") exporter.exportMarkdown(report, options);
+      else exporter.openPrintReport(report, options, printTarget!);
+      setExportOpen(false);
+      setNotice({ tone: "good", text: format === "html" ? "Exported a self-contained HTML report." : format === "markdown" ? "Exported a Markdown ZIP with figures and provenance." : "Opened the print-ready report. Choose Save as PDF in the browser print dialog." });
+    } catch (error) {
+      printTarget?.close();
+      setNotice({ tone: "bad", text: error instanceof Error ? error.message : String(error) });
+    } finally { setExportBusy(false); }
   }
 
   function useDesktopKernel() {
@@ -1240,13 +1399,23 @@ export default function App() {
   }
 
   function renderCell(cell: Cell, index: number) {
-    return <article className={`cell cell-${cell.type} ${cell.status ?? ""}`} key={cell.id}>
-      <div className="cell-rail">{cell.type === "code" ? <button title="Run this cell and any prerequisites" disabled={running} onClick={() => void runTo(index)}>▶</button> : <span>¶</span>}<small>{index + 1}</small></div>
+    const runAction = cell.status === "done" ? { glyph: "↻", label: "Run again", state: "Ran" }
+      : cell.status === "error" ? { glyph: "↻", label: "Retry", state: "Failed" }
+      : cell.status === "stale" ? { glyph: "▶", label: "Rerun required", state: "Stale" }
+      : cell.status === "running" ? { glyph: "◌", label: "Running", state: "Running" }
+      : cell.status === "skipped" ? { glyph: "↻", label: "Run again", state: "Skipped" }
+      : { glyph: "▶", label: "Run", state: "Not run" };
+    return <article className={`cell cell-${cell.type} ${cell.status ?? ""}`} data-cell-index={index} key={cell.id}>
+      <div className="cell-rail">{cell.type === "code" ? <><button aria-label={`${runAction.label} cell ${index + 1}`} title={`${runAction.label}; required earlier cells run automatically`} disabled={running} onClick={() => void runTo(index)}>{runAction.glyph}</button><small>{index + 1}</small><em>{runAction.state}</em></> : <><span>¶</span><small>{index + 1}</small></>}</div>
       <div className="cell-body">
-        {cell.type === "markdown" && !cell.editing ? <><button className="markdown-edit-action" onClick={() => updateCell(index, { editing: true })}>Edit</button><div className="prose" onDoubleClick={() => updateCell(index, { editing: true })}><ReactMarkdown remarkPlugins={[remarkGfm]}>{cell.source}</ReactMarkdown></div></> : <textarea aria-label={`${cell.type} cell ${index + 1}`} className={cell.type === "code" ? "code-editor" : "markdown-editor"} value={cell.source} spellCheck={cell.type === "markdown"} onChange={event => updateCell(index, { source: event.target.value })} onBlur={() => cell.type === "markdown" && finishMarkdownCell(index)}/>}
+        {cell.type === "markdown" && !cell.editing ? <><button className="markdown-edit-action" onClick={() => updateCell(index, { editing: true })}>Edit</button><div className="prose" onDoubleClick={() => updateCell(index, { editing: true })}><ReactMarkdown remarkPlugins={[remarkGfm]} components={MARKDOWN_COMPONENTS}>{cell.source}</ReactMarkdown></div></> : <textarea aria-label={`${cell.type} cell ${index + 1}`} className={cell.type === "code" ? "code-editor" : "markdown-editor"} value={cell.source} spellCheck={cell.type === "markdown"} onChange={event => updateCell(index, { source: event.target.value })} onBlur={() => cell.type === "markdown" && finishMarkdownCell(index)}/>}
         {cell.type === "code" && <ResultView result={cell.result} />}
       </div>
-      <div className="cell-actions"><button title="Move up" disabled={index === 0} onClick={() => { needsResetRef.current = true; setValidThrough(-1); setCells(current => current.map((item, position) => position === index - 1 ? current[index] : position === index ? current[index - 1] : item)); }}>↑</button><button title="Delete" onClick={() => { needsResetRef.current = true; setValidThrough(-1); setCells(current => current.filter((_, position) => position !== index)); }}>×</button></div>
+      <div className="cell-actions"><button aria-label={`Move cell ${index + 1} up`} title="Move cell up" disabled={index === 0} onClick={() => { needsResetRef.current = true; setValidThrough(-1); setCells(current => current.map((item, position) => position === index - 1 ? current[index] : position === index ? current[index - 1] : item).map(item => item.type === "code" && item.result ? { ...item, status: "stale" } : item)); }}>↑</button><button aria-label={`Delete cell ${index + 1}`} title="Delete cell" onClick={() => {
+        if ((cell.source.trim() || cell.result) && !window.confirm(`Delete cell ${index + 1}? This cannot be undone after you leave the notebook.`)) return;
+        needsResetRef.current = true; setValidThrough(-1);
+        setCells(current => current.filter((_, position) => position !== index).map(item => item.type === "code" && item.result ? { ...item, status: "stale" } : item));
+      }}>×</button></div>
     </article>;
   }
 
@@ -1258,8 +1427,9 @@ export default function App() {
         <button className={workspaceView === "registry" ? "active" : ""} onClick={() => navigateWorkspace("registry")}>Registry</button>
       </nav>
       <nav className="toolbar">
-        {workspaceView === "notebook" ? <><button onClick={newNotebook}>New</button><button onClick={openFile}>Open</button><button onClick={saveFile}>Save</button>{nativeDocumentsAvailable() && <button onClick={() => void saveDesktopNotebook(true)}>Save as…</button>}<details className="workspace-file-menu"><summary>Workspace{workspaceDirty ? " ●" : ""}</summary><div><button onClick={event => { openWorkspace(); event.currentTarget.closest("details")?.removeAttribute("open"); }}>Open .blw</button><button onClick={event => { saveWorkspaceFile(); event.currentTarget.closest("details")?.removeAttribute("open"); }}>{nativeDocumentsAvailable() ? "Save .blw" : "Export .blw"}</button>{nativeDocumentsAvailable() && <button onClick={event => { saveWorkspaceFile(true); event.currentTarget.closest("details")?.removeAttribute("open"); }}>Save .blw as…</button>}<button disabled={!activeDocument.lastRun} onClick={event => { saveRunRecord(); event.currentTarget.closest("details")?.removeAttribute("open"); }}>Export latest run record</button>{recentNativeDocuments.length > 0 && <div className="recent-native"><small>Recent Desktop files</small>{recentNativeDocuments.map(recent => <button key={recent.path} title={recent.path} onClick={event => { openRecentDocument(recent); event.currentTarget.closest("details")?.removeAttribute("open"); }}><span>{recent.filename}</span><em>{recent.kind}</em></button>)}</div>}</div></details>
-          <button className="primary" disabled={running || codeCount === 0} onClick={() => void runTo(cells.length - 1, true)}>▶ Run all</button>
+        {workspaceView === "notebook" && <button onClick={() => setStatisticsGuideOpen(true)}>Guided stats</button>}
+        {workspaceView === "notebook" ? <><button onClick={newNotebook}>New</button><button onClick={openFile}>Open</button><button onClick={saveFile}>Save</button><button onClick={() => setExportOpen(true)}>Export</button>{nativeDocumentsAvailable() && <button onClick={() => void saveDesktopNotebook(true)}>Save as…</button>}<details className="workspace-file-menu"><summary>Workspace{workspaceDirty ? " ●" : ""}</summary><div><button onClick={event => { openWorkspace(); event.currentTarget.closest("details")?.removeAttribute("open"); }}>Open .blw</button><button onClick={event => { saveWorkspaceFile(); event.currentTarget.closest("details")?.removeAttribute("open"); }}>{nativeDocumentsAvailable() ? "Save .blw" : "Export .blw"}</button>{nativeDocumentsAvailable() && <button onClick={event => { saveWorkspaceFile(true); event.currentTarget.closest("details")?.removeAttribute("open"); }}>Save .blw as…</button>}<button disabled={!activeDocument.lastRun} onClick={event => { saveRunRecord(); event.currentTarget.closest("details")?.removeAttribute("open"); }}>Export latest run record</button>{recentNativeDocuments.length > 0 && <div className="recent-native"><small>Recent Desktop files</small>{recentNativeDocuments.map(recent => <button key={recent.path} title={recent.path} onClick={event => { openRecentDocument(recent); event.currentTarget.closest("details")?.removeAttribute("open"); }}><span>{recent.filename}</span><em>{recent.kind}</em></button>)}</div>}</div></details>
+          <button className="primary" disabled={running || codeCount === 0} onClick={() => pendingLessonData.length ? void prepareAndRunAll() : void runTo(cells.length - 1, true)}>▶ {pendingLessonData.length ? "Prepare & run all" : "Run all"}</button>
           {running && <button onClick={() => void stopRun()}>Stop</button>}</> : <button onClick={() => void refreshRegistry()}>Refresh registry</button>}
       </nav>
       <div className="kernel-switch">
@@ -1278,8 +1448,8 @@ export default function App() {
         <div className="discover-summary"><strong>{registrySource === "loading" ? "Checking registry…" : registrySource === "unavailable" ? "Registry unavailable" : `${registryEntries.length} registered item${registryEntries.length === 1 ? "" : "s"}`}</strong><span>{registrySource === "cache" ? "Using the verified offline cache." : "Browse lessons, datasets, workflows and tools."}</span><button onClick={() => navigateWorkspace("registry")}>Browse registry</button></div>
       </section>
       <section><div className="section-head"><h2>Installed lessons</h2><button title="Add lesson package" onClick={() => setPackageOpen(true)}>＋</button></div>{catalog.length ? catalog.map(item => <div className={`lesson-row ${lesson?.id === item.id ? "active" : ""}`} key={item.id}><button className="lesson-link" onClick={() => void loadLesson(item)}><strong>{item.title}</strong><span>{item.summary}</span></button><button className="remove-package" title={`Remove ${item.title}`} onClick={() => void removePackage(item)}>×</button></div>) : <div className="empty-catalog"><p>No lesson packages installed.</p><button onClick={() => setPackageOpen(true)}>Add from manifest URL</button></div>}</section>
-      <section><h2>Data</h2>{lesson ? lesson.datasets.map(dataset => <div className="dataset" key={dataset.id}><div><strong>{dataset.title}</strong><span>{displayBytes(dataset.bytes)} · verified download</span></div><button disabled={dataReady[dataset.id]} onClick={() => void prepare(dataset.id)}>{dataReady[dataset.id] ? "Ready" : progress[dataset.id] ? `${Math.round(progress[dataset.id] / dataset.bytes * 100)}%` : "Prepare"}</button></div>) : <p className="muted">A lesson can declare the exact data it needs.</p>}
-        {visibleAttachments.map(attachment => <div className={`attached-data ${missingAttachmentIds.has(attachment.id) ? "missing" : ""}`} key={attachment.id}><div><strong>{attachment.path}</strong><span title={attachment.source.kind === "url" ? attachment.source.url : attachment.source.kind === "output" ? `Published from ${attachment.source.producerNotebookFilename}: ${attachment.source.variable}` : undefined}>{missingAttachmentIds.has(attachment.id) ? "needs data · " : `${displayBytes(attachment.size)} · `}{attachment.scope.kind === "workspace" ? "all notebooks" : "this notebook"}{attachment.source.kind === "url" ? " · HTTPS source" : attachment.source.kind === "output" ? ` · output from ${attachment.source.producerNotebookFilename}` : ""}</span></div>{missingAttachmentIds.has(attachment.id) && <button onClick={() => void prepareReferencedAttachment(attachment)}>{attachment.source.kind === "local" || attachment.source.kind === "output" ? "Reattach" : "Prepare"}</button>}<button onClick={() => changeAttachmentScope(attachment)}>{attachment.scope.kind === "workspace" ? "Keep here" : "Share"}</button><button aria-label={`Detach ${attachment.path}`} title="Detach without deleting cached source data" onClick={() => removeAttachmentFromWorkspace(attachment)}>×</button></div>)}
+      <section><h2>Data</h2>{lesson ? lesson.datasets.map(dataset => <div className={`dataset ${dataReady[dataset.id] ? "ready" : "needs-prepare"}`} key={dataset.id}><div><strong>{dataset.title}</strong><span>{dataReady[dataset.id] ? `${displayBytes(dataset.bytes)} · ready for this notebook` : `${displayBytes(dataset.bytes)} · checksum verified when prepared`}</span></div><button disabled={dataReady[dataset.id]} onClick={() => void prepare(dataset.id)}>{dataReady[dataset.id] ? "Ready" : progress[dataset.id] ? `${Math.round(progress[dataset.id] / dataset.bytes * 100)}%` : "Prepare"}</button></div>) : <p className="muted">A lesson can declare the exact data it needs.</p>}
+        {visibleUserAttachments.map(attachment => <div className={`attached-data ${missingAttachmentIds.has(attachment.id) ? "missing" : ""}`} key={attachment.id}><div><strong>{attachment.path}</strong><span title={attachment.source.kind === "url" ? attachment.source.url : attachment.source.kind === "output" ? `Published from ${attachment.source.producerNotebookFilename}: ${attachment.source.variable}` : undefined}>{missingAttachmentIds.has(attachment.id) ? "needs data · " : `${displayBytes(attachment.size)} · `}{attachment.scope.kind === "workspace" ? "all notebooks" : "this notebook"}{attachment.source.kind === "url" ? " · HTTPS source" : attachment.source.kind === "output" ? ` · output from ${attachment.source.producerNotebookFilename}` : ""}</span></div>{missingAttachmentIds.has(attachment.id) && <button onClick={() => void prepareReferencedAttachment(attachment)}>{attachment.source.kind === "local" || attachment.source.kind === "output" ? "Reattach" : "Prepare"}</button>}<button onClick={() => changeAttachmentScope(attachment)}>{attachment.scope.kind === "workspace" ? "Keep here" : "Share"}</button><button aria-label={`Detach ${attachment.path}`} title="Detach without deleting cached source data" onClick={() => removeAttachmentFromWorkspace(attachment)}>×</button></div>)}
         <div className="data-actions"><button onClick={() => {
           if (kernelKind === "desktop") void attachNativeFiles().catch(error => setNotice({ tone: "bad", text: error instanceof Error ? error.message : String(error) }));
           else { reattachTargetRef.current = null; fileInput.current?.click(); }
@@ -1291,10 +1461,10 @@ export default function App() {
     </aside>}
     {workspaceView === "notebook" ? <main>
       <div className="document-tabs"><input aria-label="Workspace name" value={workspaceName} onChange={event => setWorkspaceName(event.target.value)} /><div role="tablist" aria-label="Open notebooks">{documents.map(document => <div className={`document-tab ${document.id === activeDocumentId ? "active" : ""}`} key={document.id}><button role="tab" aria-selected={document.id === activeDocumentId} onClick={() => switchNotebook(document.id)}><span>{document.filename}</span>{document.dirty && <i title="Unsaved changes">●</i>}</button><button aria-label={`Close ${document.filename}`} onClick={() => closeNotebook(document.id)}>×</button></div>)}</div><button title="New notebook" aria-label="New notebook" onClick={newNotebook}>＋</button>{lastClosed && <button className="reopen-tab" onClick={reopenNotebook}>Reopen closed</button>}</div>
-      <div className="document-head"><div><input aria-label="Notebook name" value={filename} onChange={event => setFilename(event.target.value)} /><span>{cells.length} cells · {codeCount} runnable</span></div>{lesson && <a href={lesson.source.url} target="_blank" rel="noreferrer">Inspired by {lesson.source.title} ↗</a>}</div>
+      <div className="document-head"><div><input aria-label="Notebook name" value={filename} onChange={event => setFilename(event.target.value)} /><span>{cells.length} cells · {codeCount} runnable{codeCount ? ` · ${currentCodeCount === codeCount ? "all current" : `${currentCodeCount} current`}` : ""}</span></div>{lesson && <a href={lesson.source.url} target="_blank" rel="noreferrer">Inspired by {lesson.source.title} ↗</a>}</div>
       {notice && <div className={`notice notice-${notice.tone}`}>{notice.text}</div>}
       {(notebookChangedExternally || workspaceChangedExternally) && <div className="external-change" role="alert"><div><strong>Changed outside Studio</strong><span>Reload the disk version, or Save and explicitly confirm an overwrite.</span></div>{notebookChangedExternally && activeDocument.nativeFile && <button onClick={() => void openDesktopNotebook(activeDocument.nativeFile!.path, true)}>Reload notebook</button>}{workspaceChangedExternally && workspaceNativeFile && <button onClick={() => void openDesktopWorkspace(workspaceNativeFile.path, true)}>Reload workspace</button>}</div>}
-      <div className="cells">{displayBlocks.map(block => block.step ? <section className={`lesson-step ${collapsedSteps.has(block.step.id) ? "collapsed" : ""}`} key={block.key}>
+      <div className="cells">{pendingLessonData.length > 0 && <div className="data-preflight" role="alert"><div><strong>Prepare data before running</strong><span>This lesson needs {pendingLessonData.length} file{pendingLessonData.length === 1 ? "" : "s"}. Browser BioLang can only open them after they are downloaded, verified, and attached.</span></div><button className="primary" onClick={() => void prepareAllLessonData()}>Prepare {pendingLessonData.length === 1 ? "data" : `all ${pendingLessonData.length} files`}</button></div>}{displayBlocks.map(block => block.step ? <section className={`lesson-step ${collapsedSteps.has(block.step.id) ? "collapsed" : ""}`} key={block.key}>
         <header className="lesson-step-head"><div><span>Lesson step</span><strong>{block.step.title || "Untitled step"}</strong><small>{block.items.filter(item => item.cell.type === "code").length} runnable</small></div><div><button disabled={running || !block.items.some(item => item.cell.type === "code")} onClick={() => void runTo(block.items.at(-1)!.index)}>▶ Run step</button><button onClick={() => editStep(block.items)}>Edit source</button><button aria-label={`${collapsedSteps.has(block.step.id) ? "Expand" : "Collapse"} ${block.step.title || "lesson step"}`} onClick={() => setCollapsedSteps(current => { const next = new Set(current); if (next.has(block.step!.id)) next.delete(block.step!.id); else next.add(block.step!.id); return next; })}>{collapsedSteps.has(block.step.id) ? "▸" : "▾"}</button></div></header>
         {!collapsedSteps.has(block.step.id) && <div className="lesson-step-cells">{block.items.map(({ cell, index }) => renderCell(cell, index))}</div>}
       </section> : block.items.map(({ cell, index }) => renderCell(cell, index)))}</div>
@@ -1304,7 +1474,9 @@ export default function App() {
     <input hidden ref={notebookInput} type="file" accept=".bln,.md,.bl.md" onChange={event => { const input = event.currentTarget; const file = input.files?.[0]; input.value = ""; void openBrowserFile(file); }}/>
     <input hidden ref={workspaceInput} type="file" accept=".blw,application/json" onChange={event => { const input = event.currentTarget; const file = input.files?.[0]; input.value = ""; void openWorkspaceFile(file).catch(error => setNotice({ tone: "bad", text: error instanceof Error ? error.message : String(error) })); }}/>
     {remoteOpen && <div className="modal-backdrop"><form className="modal" onSubmit={event => { event.preventDefault(); setKernelKind("somer"); setRemoteOpen(false); }}><h2>Connect to SOMER</h2><p>The token stays in memory and is never saved by Studio.</p><label>Server URL<input required type="url" value={remoteUrl} onChange={event => setRemoteUrl(event.target.value)} placeholder="https://compute.example.org" /></label><label>Bearer token<input required type="password" value={remoteToken} onChange={event => setRemoteToken(event.target.value)} /></label><div><button type="button" onClick={() => setRemoteOpen(false)}>Cancel</button><button className="primary" type="submit">Connect</button></div></form></div>}
-    {packageOpen && <div className="modal-backdrop"><form className="modal" onSubmit={event => { event.preventDefault(); void addPackage(); }}><h2>Add a lesson package</h2><p>Paste an HTTPS URL to a BioLang Studio lesson manifest. Custom manifests are validated but do not carry the registry's manifest checksum. Declared datasets are downloaded separately only when you choose Prepare.</p><label>Manifest URL<input required type="url" value={packageUrl} onChange={event => setPackageUrl(event.target.value)} placeholder="https://example.org/lesson.json" /></label><div><button type="button" onClick={() => setPackageOpen(false)}>Cancel</button><button className="primary" type="submit">Add lesson</button></div></form></div>}
+    {packageOpen && <div className="modal-backdrop"><form className="modal" onSubmit={event => { event.preventDefault(); void addPackage(); }}><h2>Add a lesson package</h2><p>Paste an HTTPS lesson manifest URL, or an HTTP localhost URL while developing locally. Custom manifests are validated but do not carry the registry's manifest checksum. Declared datasets are downloaded separately only when you choose Prepare.</p><label>Manifest URL<input required type="url" value={packageUrl} onChange={event => setPackageUrl(event.target.value)} placeholder="https://example.org/lesson.json" /></label><div><button type="button" onClick={() => setPackageOpen(false)}>Cancel</button><button className="primary" type="submit">Add lesson</button></div></form></div>}
+    {statisticsGuideOpen && <StatisticsGuideDialog close={() => setStatisticsGuideOpen(false)} create={createGuidedStatisticsNotebook}/>}
+    {exportOpen && <ExportNotebookDialog issues={exportIssues} busy={exportBusy} close={() => setExportOpen(false)} submit={(format, options) => void exportNotebook(format, options)}/>}
     {urlDataOpen && <div className="modal-backdrop"><form className="modal url-data-modal" onSubmit={event => { event.preventDefault(); if (urlDataReview) void downloadUrlData(); else reviewUrlData(); }}>
       <h2>{urlDataReview ? "Review remote data" : "Add data from URL"}</h2>
       {urlDataError && <p className="url-data-error" role="alert">{urlDataError}</p>}
