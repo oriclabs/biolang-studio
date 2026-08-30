@@ -16,6 +16,12 @@ npm run build
 npm run test:e2e
 ```
 
+For the public web release, confirm the Pages deployment environment reports
+`https://studio.lang.bio`, `dist/CNAME` contains exactly `studio.lang.bio`, and
+the repository Pages settings show the custom domain with HTTPS enforcement.
+After deployment, run `npm run test:live`; the default smoke target is the
+custom domain.
+
 Build and launch the debug Desktop wrapper from `../biolang/desktop`, exposing
 its WebView debugging endpoint only for this local smoke test:
 
@@ -66,6 +72,14 @@ npm run test:studio-stress
   resulting report.
 - Confirm `|>` remains two literal characters in code and report output, and
   HTTP(S) links open in a new tab.
+- Download the standalone `.bln` and `.bl`; confirm the notebook remains
+  editable and the script contains runnable code cells in order but no
+  explicit `# @skip` cell.
+- Export the CLI project ZIP. Confirm it contains the notebook, script,
+  `lesson-data.json`, `README.md`, and `PROVENANCE.md`, but no dataset bytes.
+- With a current `bl`, run `bl lesson prepare lesson-data.json`, then
+  `bl lesson run lesson-data.json --offline`. Confirm declared paths remain
+  inside the unpacked directory and every input is verified by size and hash.
 
 ## Installer and clean machine
 

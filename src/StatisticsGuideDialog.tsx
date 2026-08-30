@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { generateStatisticsNotebook, STATISTICS_TASKS } from "./statistics-guide";
+import { DialogShell } from "./DialogShell";
 
 export function StatisticsGuideDialog(props: { close: () => void; create: (title: string, source: string) => void }) {
   const [taskId, setTaskId] = useState(STATISTICS_TASKS[0].id);
@@ -14,7 +15,7 @@ export function StatisticsGuideDialog(props: { close: () => void; create: (title
     setTaskId(id); setColumns(next.columns); setMethod(next.defaultMethod); setError("");
   }
 
-  return <div className="modal-backdrop"><form className="modal statistics-guide-modal" onSubmit={event => {
+  return <DialogShell label="New guided statistics notebook" close={props.close}><form className="modal statistics-guide-modal" onSubmit={event => {
     event.preventDefault();
     try { props.create(task.title, generateStatisticsNotebook(task.id, path.trim(), columns, method)); }
     catch (problem) { setError(problem instanceof Error ? problem.message : String(problem)); }
@@ -29,5 +30,5 @@ export function StatisticsGuideDialog(props: { close: () => void; create: (title
     <label>Method<select value={method} onChange={event => setMethod(event.target.value)}>{task.methods.map(item => <option key={item} value={item}>{item}</option>)}</select></label>
     <p className="modal-guidance">The guide does not infer whether rows are independent or paired, choose an experimental unit, remove outliers, or transform the data.</p>
     <div><button type="button" onClick={props.close}>Cancel</button><button className="primary" type="submit">Create notebook</button></div>
-  </form></div>;
+  </form></DialogShell>;
 }

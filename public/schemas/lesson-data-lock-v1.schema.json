@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://studio.lang.bio/schemas/lesson-data-lock-v1.schema.json",
+  "title": "BioLang lesson data lock",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "schema", "kind", "generatedAt", "project", "files"],
+  "properties": {
+    "$schema": { "const": "https://studio.lang.bio/schemas/lesson-data-lock-v1.schema.json" },
+    "schema": { "const": 1 },
+    "kind": { "const": "biolang-lesson-data-lock" },
+    "generatedAt": { "type": "string", "format": "date-time" },
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["notebook", "script"],
+      "properties": {
+        "notebook": { "type": "string", "pattern": "^[^/\\\\]+\\.bln$" },
+        "script": { "type": "string", "pattern": "^[^/\\\\]+\\.bl$" }
+      }
+    },
+    "lesson": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "source"],
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "version": { "type": "string" },
+        "manifestUrl": { "type": "string", "format": "uri" },
+        "manifestSha256": { "type": "string", "pattern": "^[A-Fa-f0-9]{64}$" },
+        "source": {
+          "type": "object",
+          "required": ["title", "url", "note"],
+          "properties": {
+            "title": { "type": "string" },
+            "url": { "type": "string", "format": "uri" },
+            "note": { "type": "string" }
+          }
+        }
+      }
+    },
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "title", "path", "url", "bytes", "sha256", "mediaType", "source", "citation", "rights", "role"],
+        "properties": {
+          "id": { "type": "string" },
+          "title": { "type": "string" },
+          "path": { "type": "string" },
+          "url": { "type": "string", "format": "uri" },
+          "bytes": { "type": "integer", "minimum": 1 },
+          "sha256": { "type": "string", "pattern": "^[A-Fa-f0-9]{64}$" },
+          "mediaType": { "type": "string" },
+          "source": { "type": "string" },
+          "citation": { "type": "string" },
+          "rights": { "type": "string" },
+          "role": { "const": "input" }
+        }
+      }
+    }
+  }
+}

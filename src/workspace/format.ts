@@ -31,6 +31,7 @@ export interface StoredNotebook {
   filename: string;
   source: string;
   lesson?: LessonManifest;
+  lessonManifestSha256?: string;
   dataReady?: Record<string, boolean>;
   attachmentIds: string[];
 }
@@ -80,6 +81,7 @@ function validateWorkspaceVersion(value: unknown, schema: 1 | 2 | 3, schemaUrl: 
   const notebookIds = new Set<string>();
   for (const notebook of workspace.notebooks) {
     if (typeof notebook?.id !== "string" || !notebook.id || notebookIds.has(notebook.id) || !isSafeWorkspacePath(notebook.filename) || typeof notebook.source !== "string" ||
+        (notebook.lessonManifestSha256 !== undefined && !/^[a-f0-9]{64}$/i.test(notebook.lessonManifestSha256)) ||
         !Array.isArray(notebook.attachmentIds) || notebook.attachmentIds.some(id => typeof id !== "string" || !id) || new Set(notebook.attachmentIds).size !== notebook.attachmentIds.length) {
       throw new Error("Workspace contains an invalid notebook record.");
     }

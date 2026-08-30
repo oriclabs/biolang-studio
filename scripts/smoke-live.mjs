@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { chromium } from "@playwright/test";
 
-const studioUrl = process.env.STUDIO_URL || "https://oriclabs.com/biolang-studio/";
+const studioUrl = process.env.STUDIO_URL || "https://studio.lang.bio/";
 const registryUrls = [
   process.env.REGISTRY_URL || "https://registry.lang.bio/v1/index.json",
   "https://raw.githubusercontent.com/oriclabs/biolang-registry/main/registry/v1/index.json",

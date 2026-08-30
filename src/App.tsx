@@ -1,11 +1,12 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import ReactMarkdown, { type Components } from "react-markdown";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { CatalogEntry, DatasetManifest, LessonManifest } from "./content/manifest";
-import { manifestLessonEntries, validateManifest } from "./content/manifest";
+import { lessonEntryForDocument, manifestLessonEntries, validateManifest } from "./content/manifest";
 import { isLoopbackUrl } from "./content/url-policy";
-import { installLesson, installedLessons, uninstallLesson } from "./content/installed";
-import { fetchRegisteredDataset, fetchRegistry, type RegisteredDatasetManifest, type RegistryEntry, type RegistryKindFilter, type RegistrySource } from "./content/registry";
+import { installLesson, installedLessons, lessonUpdateAvailable, uninstallLesson } from "./content/installed";
+import { manifestLessonShareUrl, parseLessonLaunchUrl, registryLessonShareUrl, removeLessonLaunchParams, type LessonLaunchRequest } from "./content/lesson-links";
+import { fetchRegisteredDataset, fetchRegistry, latestRegistryEntry, publicRegistryUrl, type RegisteredDatasetManifest, type RegistryEntry, type RegistryKindFilter, type RegistrySource } from "./content/registry";
 import type { AttachedFile, ExecutionResult, Kernel, KernelKind, NativeFileReference, RuntimeInfo, StructuredResult, VariableExportFormat, VariableSummary } from "./kernel/protocol";
 import { DesktopKernel, desktopAvailable } from "./kernel/desktop-client";
 import { SomerKernel } from "./kernel/somer-client";
@@ -19,16 +20,17 @@ import { VariableInspector } from "./VariableInspector";
 import { StatisticsGuideDialog } from "./StatisticsGuideDialog";
 import { PlotView } from "./PlotView";
 import { ExportNotebookDialog } from "./ExportNotebookDialog";
+import { DialogShell } from "./DialogShell";
+import { LessonLaunchDialog, type LessonLaunchReview } from "./LessonLaunchDialog";
+import { LessonUpdateDialog } from "./LessonUpdateDialog";
 import { reportIssues, type NotebookReport, type ReportFormat, type ReportOptions } from "./export/model";
+import { markdownComponents } from "./markdown-components";
+import { applyStudioTheme, readStudioTheme, saveStudioTheme, type StudioTheme } from "./theme";
 
 type Cell = NotebookCell & { result?: ExecutionResult; editing?: boolean };
-type Notice = { tone: "info" | "good" | "bad"; text: string } | null;
-const MARKDOWN_COMPONENTS: Components = {
-  a: ({ href, children, ...props }) => {
-    const external = /^https?:\/\//i.test(href ?? "");
-    return <a href={href} {...props} {...(external ? { target: "_blank", rel: "noopener noreferrer" } : {})}>{children}</a>;
-  },
-};
+type Notice = { tone: "info" | "good" | "bad"; text: string; id?: string } | null;
+const MARKDOWN_COMPONENTS = markdownComponents();
+const INITIAL_NOTICE: NonNullable<Notice> = { id: "welcome", tone: "info", text: "Run any code cell; required earlier cells run automatically." };
 type WorkspaceView = "notebook" | "registry";
 type DisplayBlock = { key: string; step?: NonNullable<NotebookCell["step"]>; items: Array<{ cell: Cell; index: number }> };
 type RunRecord = {
@@ -51,11 +53,18 @@ type NotebookDocument = {
   filename: string;
   cells: Cell[];
   lesson: LessonManifest | null;
+  lessonManifestSha256?: string;
   validThrough: number;
   dataReady: Record<string, boolean>;
   dirty: boolean;
   lastRun?: RunRecord;
   nativeFile?: NativeDocumentBinding;
+};
+type DocumentTabGroup = {
+  key: string;
+  label: string;
+  documents: NotebookDocument[];
+  collection: boolean;
 };
 type UrlDataDraft = { url: string; path: string; mediaType: string; expectedBytes: string; expectedSha256: string; shared: boolean };
 
@@ -80,8 +89,30 @@ function inferredMediaType(path: string) {
   return "text/plain";
 }
 
-function createNotebook(filename = "untitled.bln", source = SAMPLE, lesson: LessonManifest | null = null): NotebookDocument {
-  return { id: crypto.randomUUID(), filename, cells: parseNotebook(source), lesson, validThrough: -1, dataReady: {}, dirty: false };
+function createNotebook(filename = "untitled.bln", source = SAMPLE, lesson: LessonManifest | null = null, lessonManifestSha256?: string): NotebookDocument {
+  return { id: crypto.randomUUID(), filename, cells: parseNotebook(source), lesson, lessonManifestSha256, validThrough: -1, dataReady: {}, dirty: false };
+}
+
+function collectionKey(document: NotebookDocument) {
+  return document.lesson?.schema === 2
+    ? `lesson:${document.lesson.id}:${document.lessonManifestSha256 ?? "local"}`
+    : `notebook:${document.id}`;
+}
+
+function groupDocumentTabs(documents: NotebookDocument[]): DocumentTabGroup[] {
+  const groups: DocumentTabGroup[] = [];
+  for (const document of documents) {
+    const key = collectionKey(document);
+    const existing = groups.find(group => group.key === key);
+    if (existing) existing.documents.push(document);
+    else groups.push({
+      key,
+      label: document.lesson?.schema === 2 ? document.lesson.title : document.filename,
+      documents: [document],
+      collection: document.lesson?.schema === 2,
+    });
+  }
+  return groups;
 }
 
 function groupNotebookCells(cells: Cell[]): DisplayBlock[] {
@@ -107,8 +138,8 @@ function registryStateFromUrl(): { view: WorkspaceView; filters: RegistryViewSta
     filters: {
       query: params.get("q") ?? "", kind: kind && kinds.has(kind) ? kind : "all",
       category: params.get("category") ?? "", runtime: params.get("runtime") ?? "",
-      access: (["public", "registration", "controlled"].includes(params.get("access") ?? "") ? params.get("access") : "all") as RegistryViewState["access"],
-      verification: (["verified", "preview"].includes(params.get("trust") ?? "") ? params.get("trust") : "all") as RegistryViewState["verification"],
+      access: (kind === "dataset" && ["public", "registration", "controlled"].includes(params.get("access") ?? "") ? params.get("access") : "all") as RegistryViewState["access"],
+      verification: ((params.get("trust") === "preview" ? "unverified" : ["verified", "unverified"].includes(params.get("trust") ?? "") ? params.get("trust") : "all")) as RegistryViewState["verification"],
       sort: (["recent", "name", "size"].includes(params.get("sort") ?? "") ? params.get("sort") : "relevance") as RegistryViewState["sort"],
     },
     entry: params.get("entry") ?? "",
@@ -150,7 +181,28 @@ function asDatasetManifest(manifest: RegisteredDatasetManifest, file: Registered
   };
 }
 
-function ResultView({ result }: { result?: ExecutionResult }) {
+function lessonLaunchFromLocation(): { request: LessonLaunchRequest | null; error: string } {
+  try { return { request: parseLessonLaunchUrl(location.href), error: "" }; }
+  catch (error) { return { request: null, error: error instanceof Error ? error.message : String(error) }; }
+}
+
+async function inspectLessonManifest(rawUrl: string, baseUrl: string, expectedHash?: string, expectedId?: string, signal?: AbortSignal) {
+  const parsedUrl = new URL(rawUrl, baseUrl);
+  if (parsedUrl.protocol !== "https:" && !(parsedUrl.protocol === "http:" && isLoopbackUrl(parsedUrl))) throw new Error("Lesson manifests must use HTTPS (HTTP loopback URLs are allowed for local development).");
+  const response = await fetch(parsedUrl.href, { credentials: "omit", referrerPolicy: "no-referrer", cache: "no-cache", signal });
+  if (!response.ok) throw new Error(`Lesson manifest returned HTTP ${response.status}.`);
+  const manifestText = await response.text();
+  const observedSha256 = await sha256(manifestText);
+  if (expectedHash && observedSha256.toLowerCase() !== expectedHash.toLowerCase()) throw new Error("The lesson manifest failed its shared or registry SHA-256 check.");
+  let decoded: unknown;
+  try { decoded = JSON.parse(manifestText); }
+  catch { throw new Error("Lesson manifest is not valid JSON."); }
+  const manifest = validateManifest(decoded, { allowLoopback: isLoopbackUrl(parsedUrl) });
+  if (expectedId && manifest.id !== expectedId) throw new Error(`The lesson link expected '${expectedId}', but the manifest identifies '${manifest.id}'.`);
+  return { manifest, manifestUrl: parsedUrl.href, observedSha256 };
+}
+
+const ResultView = memo(function ResultView({ result }: { result?: ExecutionResult }) {
   if (!result) return null;
   return <div className={`result ${result.ok ? "result-ok" : "result-error"}`} role={result.ok ? undefined : "alert"}>
     <div className="result-meta"><span>{result.backend ?? "kernel"}</span><span>{result.elapsedMs ?? 0} ms</span></div>
@@ -159,7 +211,36 @@ function ResultView({ result }: { result?: ExecutionResult }) {
     {result.ok && result.results?.map((item, index) => <StructuredView key={index} result={item} />)}
     {result.ok && !result.results?.length && result.value && result.value !== "Nil" && <pre>{result.value}</pre>}
   </div>;
-}
+});
+
+const MarkdownView = memo(function MarkdownView({ source, index, edit }: { source: string; index: number; edit: (index: number) => void }) {
+  return <div className="prose" onDoubleClick={() => edit(index)}><ReactMarkdown remarkPlugins={[remarkGfm]} components={MARKDOWN_COMPONENTS}>{source}</ReactMarkdown></div>;
+});
+
+const AutoGrowTextarea = memo(function AutoGrowTextarea({ label, className, value, spellCheck, change, blur, run }: {
+  label: string; className: string; value: string; spellCheck: boolean; change: (value: string) => void; blur?: () => void; run?: (advance: boolean) => void;
+}) {
+  const editor = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => {
+    const element = editor.current;
+    if (!element) return;
+    element.style.height = "auto";
+    element.style.height = `${Math.max(90, element.scrollHeight)}px`;
+  }, [value]);
+  return <textarea ref={editor} aria-label={label} className={className} value={value} spellCheck={spellCheck} onChange={event => change(event.target.value)} onBlur={blur} onKeyDown={event => {
+    if (run && event.key === "Enter" && (event.shiftKey || event.ctrlKey || event.metaKey)) {
+      event.preventDefault(); run(event.shiftKey); return;
+    }
+    if (className === "code-editor" && event.key === "Tab" && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      event.preventDefault();
+      const target = event.currentTarget;
+      const start = target.selectionStart; const end = target.selectionEnd;
+      const insertion = "  ";
+      change(`${value.slice(0, start)}${insertion}${value.slice(end)}`);
+      requestAnimationFrame(() => { target.selectionStart = target.selectionEnd = start + insertion.length; });
+    }
+  }}/>;
+}, (previous, next) => previous.label === next.label && previous.className === next.className && previous.value === next.value && previous.spellCheck === next.spellCheck);
 
 function readableValue(value: unknown) {
   if (value === null || value === undefined) return "—";
@@ -169,13 +250,15 @@ function readableValue(value: unknown) {
 }
 
 function ValueTable({ value }: { value: unknown }) {
+  const [limit, setLimit] = useState(100);
+  useEffect(() => setLimit(100), [value]);
   if (Array.isArray(value)) {
     const records = value.filter(item => item && typeof item === "object" && !Array.isArray(item)) as Array<Record<string, unknown>>;
     if (records.length === value.length && records.length > 0) {
       const columns = [...new Set(records.flatMap(record => Object.keys(record)))];
-      return <div className="table-wrap"><table><thead><tr>{columns.map(column => <th key={column}>{column}</th>)}</tr></thead><tbody>{records.slice(0, 100).map((record, row) => <tr key={row}>{columns.map(column => <td key={column}>{readableValue(record[column])}</td>)}</tr>)}</tbody></table>{records.length > 100 && <p>Showing the first 100 of {records.length} rows.</p>}</div>;
+      return <div className="table-wrap"><table><thead><tr>{columns.map(column => <th key={column}>{column}</th>)}</tr></thead><tbody>{records.slice(0, limit).map((record, row) => <tr key={row}>{columns.map(column => <td key={column}>{readableValue(record[column])}</td>)}</tr>)}</tbody></table>{records.length > limit && <p>Showing {limit} of {records.length} rows. <button onClick={() => setLimit(current => Math.min(records.length, current + 100))}>Show 100 more</button></p>}</div>;
     }
-    return <div className="table-wrap"><table><thead><tr><th>#</th><th>Value</th></tr></thead><tbody>{value.slice(0, 100).map((item, index) => <tr key={index}><td>{index + 1}</td><td>{readableValue(item)}</td></tr>)}</tbody></table>{value.length > 100 && <p>Showing the first 100 of {value.length} values.</p>}</div>;
+    return <div className="table-wrap"><table><thead><tr><th>#</th><th>Value</th></tr></thead><tbody>{value.slice(0, limit).map((item, index) => <tr key={index}><td>{index + 1}</td><td>{readableValue(item)}</td></tr>)}</tbody></table>{value.length > limit && <p>Showing {limit} of {value.length} values. <button onClick={() => setLimit(current => Math.min(value.length, current + 100))}>Show 100 more</button></p>}</div>;
   }
   if (value && typeof value === "object") {
     return <div className="table-wrap key-value-table"><table><thead><tr><th>Measure</th><th>Value</th></tr></thead><tbody>{Object.entries(value).map(([key, item]) => <tr key={key}><th scope="row">{key.replaceAll("_", " ")}</th><td>{readableValue(item)}</td></tr>)}</tbody></table></div>;
@@ -203,6 +286,7 @@ function StructuredView({ result }: { result: StructuredResult }) {
 
 export default function App() {
   const initialRegistryState = useRef(registryStateFromUrl()).current;
+  const initialLessonLaunch = useRef(lessonLaunchFromLocation()).current;
   const kernelRef = useRef<Kernel | null>(null);
   const attachedRef = useRef(new Map<string, AttachedFile>());
   const fileStoreRef = useRef(new Map<string, AttachedFile>());
@@ -214,6 +298,7 @@ export default function App() {
   const notebookInput = useRef<HTMLInputElement>(null);
   const workspaceInput = useRef<HTMLInputElement>(null);
   const reattachTargetRef = useRef<WorkspaceAttachment | null>(null);
+  const collectionSelectionRef = useRef<Record<string, string>>({});
   const initialDocuments = useRef<NotebookDocument[] | null>(null);
   if (!initialDocuments.current) initialDocuments.current = [createNotebook()];
   const [documents, setDocuments] = useState<NotebookDocument[]>(initialDocuments.current);
@@ -231,11 +316,14 @@ export default function App() {
   const [missingAttachmentIds, setMissingAttachmentIds] = useState<Set<string>>(() => new Set());
   const [localStorageStatus, setLocalStorageStatus] = useState<StorageStatus>({ usage: 0, quota: 0, persistent: false });
   const [catalog, setCatalog] = useState<CatalogEntry[]>([]);
+  const [lessonInfo, setLessonInfo] = useState<CatalogEntry | null>(null);
   const [kernelKind, setKernelKind] = useState<KernelKind>("browser");
   const [kernelState, setKernelState] = useState("starting");
+  const [colorTheme, setColorTheme] = useState<StudioTheme>(readStudioTheme);
   const [kernelEpoch, setKernelEpoch] = useState(0);
   const [running, setRunning] = useState(false);
-  const [notice, setNotice] = useState<Notice>({ tone: "info", text: "Run any code cell; required earlier cells run automatically." });
+  const [notice, setNoticeState] = useState<Notice>(INITIAL_NOTICE);
+  const setNotice = useCallback((next: Notice) => setNoticeState(current => current?.tone === "bad" && next?.tone === "info" ? current : next), []);
   const [variables, setVariables] = useState<VariableSummary[]>([]);
   const [variableRevision, setVariableRevision] = useState(0);
   const [collapsedSteps, setCollapsedSteps] = useState<Set<string>>(() => new Set());
@@ -254,11 +342,19 @@ export default function App() {
   const [exportOpen, setExportOpen] = useState(false);
   const [exportBusy, setExportBusy] = useState(false);
   const [packageUrl, setPackageUrl] = useState("");
+  const [lessonLaunchRequest, setLessonLaunchRequest] = useState<LessonLaunchRequest | null>(initialLessonLaunch.request);
+  const [lessonLaunchReview, setLessonLaunchReview] = useState<LessonLaunchReview | null>(null);
+  const [lessonLaunchLoading, setLessonLaunchLoading] = useState(Boolean(initialLessonLaunch.request));
+  const [lessonLaunchError, setLessonLaunchError] = useState(initialLessonLaunch.error);
+  const [lessonLaunchBusy, setLessonLaunchBusy] = useState(false);
+  const [pendingLaunchRunId, setPendingLaunchRunId] = useState("");
   const [workspaceView, setWorkspaceView] = useState<WorkspaceView>(initialRegistryState.view);
   const [registryEntries, setRegistryEntries] = useState<RegistryEntry[]>([]);
   const [registrySource, setRegistrySource] = useState<RegistrySource | "loading" | "unavailable">("loading");
+  const [registryCheckedAt, setRegistryCheckedAt] = useState("");
   const [registryError, setRegistryError] = useState("");
   const [installingId, setInstallingId] = useState("");
+  const [lessonUpdateEntry, setLessonUpdateEntry] = useState<RegistryEntry | null>(null);
   const [registryFilters, setRegistryFilters] = useState<RegistryViewState>(initialRegistryState.filters);
   const [selectedRegistryKey, setSelectedRegistryKey] = useState(initialRegistryState.entry);
   const [registryDatasetDetails, setRegistryDatasetDetails] = useState<RegisteredDatasetManifest | null>(null);
@@ -267,6 +363,10 @@ export default function App() {
   const [preparedRegistryDatasets, setPreparedRegistryDatasets] = useState<Set<string>>(() => new Set());
   const activeDocument = documents.find(document => document.id === activeDocumentId) ?? documents[0];
   const { cells, lesson, filename, validThrough, dataReady } = activeDocument;
+  const documentTabGroups = useMemo(() => groupDocumentTabs(documents), [documents]);
+  const activeCollectionEntries = useMemo(() => lesson?.schema === 2 ? manifestLessonEntries(lesson) : [], [lesson]);
+  const activeCollectionEntry = lesson?.schema === 2 ? lessonEntryForDocument(lesson, filename) : undefined;
+  const activeCollectionIndex = activeCollectionEntry ? activeCollectionEntries.findIndex(entry => entry.id === activeCollectionEntry.id) : -1;
   const visibleAttachments = useMemo(() => workspaceAttachments.filter(attachment => attachment.scope.kind === "workspace" || attachment.scope.notebookId === activeDocumentId), [workspaceAttachments, activeDocumentId]);
   const visibleUserAttachments = useMemo(() => visibleAttachments.filter(attachment => {
     if (attachment.source.kind !== "dataset") return true;
@@ -277,6 +377,10 @@ export default function App() {
   const workspaceDirty = Boolean(workspaceNativeFile && workspaceBaselineRef.current && workspaceBaselineRef.current !== currentWorkspaceText);
   const notebookChangedExternally = Boolean(activeDocument.nativeFile && externallyChangedPaths.has(activeDocument.nativeFile.path));
   const workspaceChangedExternally = Boolean(workspaceNativeFile && externallyChangedPaths.has(workspaceNativeFile.path));
+
+  useEffect(() => {
+    if (activeDocument.lesson?.schema === 2) collectionSelectionRef.current[collectionKey(activeDocument)] = activeDocument.id;
+  }, [activeDocument]);
 
   function updateDocument(id: string, updater: (document: NotebookDocument) => NotebookDocument) {
     setDocuments(current => current.map(document => document.id === id ? updater(document) : document));
@@ -314,6 +418,15 @@ export default function App() {
   useEffect(() => { void refreshStorageStatus(); }, []);
 
   useEffect(() => {
+    const preference = window.matchMedia("(prefers-color-scheme: dark)");
+    const syncTheme = () => applyStudioTheme(colorTheme, preference.matches);
+    saveStudioTheme(colorTheme);
+    syncTheme();
+    if (colorTheme === "system") preference.addEventListener("change", syncTheme);
+    return () => preference.removeEventListener("change", syncTheme);
+  }, [colorTheme]);
+
+  useEffect(() => {
     let active = true;
     loadWorkspaceSession(raw => Boolean(migratePortableWorkspace(JSON.parse(raw)))).then(saved => {
       if (!active || !saved) return;
@@ -323,6 +436,7 @@ export default function App() {
         filename: notebook.filename,
         cells: parseNotebook(notebook.source),
         lesson: notebook.lesson ? validateManifest(notebook.lesson) : null,
+        lessonManifestSha256: notebook.lessonManifestSha256,
         validThrough: -1,
         dataReady: notebook.dataReady ?? {},
         dirty: false,
@@ -456,13 +570,90 @@ export default function App() {
   const currentCodeCount = useMemo(() => cells.filter(cell => cell.type === "code" && (cell.status === "done" || cell.status === "skipped")).length, [cells]);
   const displayBlocks = useMemo(() => groupNotebookCells(cells), [cells]);
   const pendingLessonData = useMemo(() => lesson?.datasets.filter(dataset => !dataReady[dataset.id]) ?? [], [lesson, dataReady]);
-  const installedLessonNames = useMemo(() => new Set(catalog.map(item => item.id)), [catalog]);
+  const installedLessonKeys = useMemo(() => new Set(catalog.flatMap(installed => registryEntries
+    .filter(entry => entry.kind === "lesson" && entry.name === installed.id &&
+      (installed.manifestSha256 ? entry.manifestSha256.toLowerCase() === installed.manifestSha256.toLowerCase() : entry.version === installed.version))
+    .map(registryEntryKey))), [catalog, registryEntries]);
+  const openLessonKeys = useMemo(() => new Set(documents.flatMap(document => {
+    if (!document.lesson) return [];
+    const revision = document.lessonManifestSha256 ?? catalog.find(item => item.id === document.lesson?.id)?.manifestSha256;
+    return registryEntries.filter(entry => entry.kind === "lesson" && entry.name === document.lesson?.id &&
+      (!revision || entry.manifestSha256.toLowerCase() === revision.toLowerCase())).map(registryEntryKey);
+  })), [documents, catalog, registryEntries]);
+  const modifiedLessonKeys = useMemo(() => new Set(documents.flatMap(document => {
+    if (!document.lesson || !document.dirty) return [];
+    const revision = document.lessonManifestSha256 ?? catalog.find(item => item.id === document.lesson?.id)?.manifestSha256;
+    return registryEntries.filter(entry => entry.kind === "lesson" && entry.name === document.lesson?.id &&
+      (!revision || entry.manifestSha256.toLowerCase() === revision.toLowerCase())).map(registryEntryKey);
+  })), [documents, catalog, registryEntries]);
+  const catalogWithRegistrySeries = useMemo(() => catalog.map(item => {
+    if (item.series) return item;
+    const candidates = registryEntries.filter(entry => entry.kind === "lesson" && entry.name === item.id && entry.series);
+    const registered = candidates[0] ? latestRegistryEntry(candidates, candidates[0].id) : undefined;
+    return registered?.series ? { ...item, series: registered.series } : item;
+  }), [catalog, registryEntries]);
+  const lessonSeries = useMemo(() => {
+    const series = new Map<string, { id: string; title: string; url: string; items: CatalogEntry[] }>();
+    const standalone: CatalogEntry[] = [];
+    for (const item of catalogWithRegistrySeries) {
+      if (!item.series) { standalone.push(item); continue; }
+      const group = series.get(item.series.id) ?? { id: item.series.id, title: item.series.title, url: item.series.url, items: [] };
+      group.items.push(item); series.set(item.series.id, group);
+    }
+    for (const group of series.values()) group.items.sort((left, right) =>
+      (left.series?.order ?? 0) - (right.series?.order ?? 0) || left.title.localeCompare(right.title));
+    return { groups: [...series.values()].sort((left, right) => left.title.localeCompare(right.title)), standalone };
+  }, [catalogWithRegistrySeries]);
+  const activeInstalledLesson = lesson ? catalogWithRegistrySeries.find(item => item.id === lesson.id) : undefined;
+  const activeRegistryLesson = lesson ? registryEntries.find(entry => entry.kind === "lesson" && entry.name === lesson.id &&
+    (!activeDocument.lessonManifestSha256 || entry.manifestSha256.toLowerCase() === activeDocument.lessonManifestSha256.toLowerCase())) : undefined;
+  const activeSeriesGroup = activeInstalledLesson?.series ? lessonSeries.groups.find(group => group.id === activeInstalledLesson.series?.id) : undefined;
+  const activeSeriesIndex = activeSeriesGroup ? activeSeriesGroup.items.findIndex(item => item.id === activeInstalledLesson?.id) : -1;
+  const previousSeriesLesson = activeSeriesIndex > 0 ? activeSeriesGroup?.items[activeSeriesIndex - 1] : undefined;
+  const nextSeriesLesson = activeSeriesGroup && activeSeriesIndex >= 0 && activeSeriesIndex < activeSeriesGroup.items.length - 1 ? activeSeriesGroup.items[activeSeriesIndex + 1] : undefined;
+  const outdatedLessonKeys = useMemo(() => new Set(catalog.flatMap(installed => {
+    const candidates = registryEntries.filter(entry => entry.kind === "lesson" && entry.name === installed.id);
+    const registered = candidates[0] ? latestRegistryEntry(candidates, candidates[0].id) : undefined;
+    return registered && lessonUpdateAvailable(installed, registered, location.href) ? [registryEntryKey(registered)] : [];
+  })), [catalog, registryEntries]);
+  const outdatedInstalledNames = useMemo(() => new Set(registryEntries
+    .filter(entry => outdatedLessonKeys.has(registryEntryKey(entry))).map(entry => entry.name)), [registryEntries, outdatedLessonKeys]);
+  const lessonUpdateInstalled = lessonUpdateEntry ? catalog.find(item => item.id === lessonUpdateEntry.name) : undefined;
   const selectedRegistryEntry = useMemo(() => registryEntries.find(entry => registryEntryKey(entry) === selectedRegistryKey) ?? null, [registryEntries, selectedRegistryKey]);
+  const lessonLaunchRuntimeCompatible = !lessonLaunchReview || lessonLaunchReview.manifest.runtime === "browser" ||
+    (lessonLaunchReview.manifest.runtime === "desktop" && kernelKind === "desktop") ||
+    (lessonLaunchReview.manifest.runtime === "remote" && kernelKind === "somer");
   const exportIssues = useMemo(() => reportIssues({
     workspaceName, filename, generatedAt: "", cells,
     missingData: lesson?.datasets.filter(dataset => !dataReady[dataset.id]).map(dataset => dataset.path) ?? [],
     runRecord: activeDocument.lastRun,
   }), [workspaceName, filename, cells, lesson, dataReady, activeDocument.lastRun]);
+
+  useEffect(() => {
+    if (!lessonLaunchRequest || (lessonLaunchRequest.kind === "registry" && registrySource === "loading")) return;
+    const registryEntry = lessonLaunchRequest.kind === "registry"
+      ? registryEntries.find(entry => entry.kind === "lesson" && entry.id === lessonLaunchRequest.id && entry.version === lessonLaunchRequest.version)
+      : undefined;
+    if (lessonLaunchRequest.kind === "registry" && !registryEntry) {
+      setLessonLaunchLoading(false);
+      setLessonLaunchReview(null);
+      setLessonLaunchError(`The registry does not contain ${lessonLaunchRequest.id}@${lessonLaunchRequest.version}. Ask the sender for an available exact version.`);
+      return;
+    }
+    const controller = new AbortController();
+    let active = true;
+    const manifestUrl = registryEntry?.manifest ?? (lessonLaunchRequest.kind === "manifest" ? lessonLaunchRequest.manifest : "");
+    const expectedHash = registryEntry?.manifestSha256 ?? (lessonLaunchRequest.kind === "manifest" ? lessonLaunchRequest.sha256 : undefined);
+    const expectedId = registryEntry?.name;
+    setLessonLaunchLoading(true); setLessonLaunchError(""); setLessonLaunchReview(null);
+    inspectLessonManifest(manifestUrl, location.href, expectedHash, expectedId, controller.signal).then(inspected => {
+      if (active) setLessonLaunchReview({ request: lessonLaunchRequest, registryEntry, ...inspected });
+    }).catch(error => {
+      if (!active || (error instanceof DOMException && error.name === "AbortError")) return;
+      setLessonLaunchError(error instanceof Error ? error.message : String(error));
+    }).finally(() => active && setLessonLaunchLoading(false));
+    return () => { active = false; controller.abort(); };
+  }, [lessonLaunchRequest, registryEntries, registrySource]);
 
   useEffect(() => {
     if (!runAfterPrepareRef.current || pendingLessonData.length || running || kernelState !== "ready") return;
@@ -471,18 +662,29 @@ export default function App() {
   }, [pendingLessonData.length, running, kernelState, cells.length]);
 
   useEffect(() => {
+    if (!pendingLaunchRunId || lesson?.id !== pendingLaunchRunId || running || kernelState !== "ready") return;
+    setPendingLaunchRunId("");
+    if (pendingLessonData.length) void prepareAndRunAll();
+    else void runTo(cells.length - 1, true);
+  }, [pendingLaunchRunId, lesson?.id, pendingLessonData.length, running, kernelState, cells.length]);
+
+  useEffect(() => {
     let active = true;
+    const controller = new AbortController();
     setRegistryDatasetDetails(null); setRegistryDetailError("");
     if (selectedRegistryEntry?.kind !== "dataset") { setRegistryDetailLoading(false); return () => { active = false; }; }
     setRegistryDetailLoading(true);
-    fetchRegisteredDataset(selectedRegistryEntry).then(async manifest => {
+    fetchRegisteredDataset(selectedRegistryEntry, controller.signal).then(async manifest => {
       if (!active) return;
       setRegistryDatasetDetails(manifest);
       const cached = await Promise.all(manifest.files.map(file => hasDataset(asDatasetManifest(manifest, file))));
       if (active && cached.every(Boolean)) setPreparedRegistryDatasets(current => new Set(current).add(manifest.id));
-    }).catch(error => active && setRegistryDetailError(error instanceof Error ? error.message : String(error)))
+    }).catch(error => {
+      if (!active || (error instanceof DOMException && error.name === "AbortError")) return;
+      setRegistryDetailError(error instanceof Error ? error.message : String(error));
+    })
       .finally(() => active && setRegistryDetailLoading(false));
-    return () => { active = false; };
+    return () => { active = false; controller.abort(); };
   }, [selectedRegistryEntry]);
 
   function makePortableWorkspace(): PortableWorkspace {
@@ -497,6 +699,7 @@ export default function App() {
         filename: document.filename.trim() || "untitled.bln",
         source: serializeNotebook(document.cells),
         ...(document.lesson ? { lesson: document.lesson } : {}),
+        ...(document.lessonManifestSha256 ? { lessonManifestSha256: document.lessonManifestSha256 } : {}),
         dataReady: document.dataReady,
         attachmentIds: workspaceAttachments.filter(attachment => attachment.scope.kind === "workspace" || attachment.scope.notebookId === document.id).map(attachment => attachment.id),
       })),
@@ -528,37 +731,56 @@ export default function App() {
 
   function updateCell(index: number, patch: Partial<Cell>) {
     const sourceChanged = patch.source !== undefined;
+    const changesExecution = sourceChanged && cells[index]?.type === "code";
     updateDocument(activeDocumentId, document => ({
       ...document,
       cells: document.cells.map((cell, position) => {
         const updated = position === index ? { ...cell, ...patch } : cell;
-        return sourceChanged && position >= index && updated.type === "code" && updated.result ? { ...updated, status: "stale" } : updated;
+        return changesExecution && position >= index && updated.type === "code" && updated.result ? { ...updated, status: "stale" } : updated;
       }),
       dirty: sourceChanged ? true : document.dirty,
     }));
-    if (sourceChanged) { needsResetRef.current = true; setValidThrough(current => Math.min(current, index - 1)); }
+    if (changesExecution) { needsResetRef.current = true; setValidThrough(current => Math.min(current, index - 1)); }
   }
+
+  const editMarkdown = useCallback((index: number) => {
+    setDocuments(current => current.map(document => document.id === activeDocumentId ? {
+      ...document, cells: document.cells.map((cell, position) => position === index ? { ...cell, editing: true } : cell)
+    } : document));
+  }, [activeDocumentId]);
 
   function navigateWorkspace(view: WorkspaceView) {
     const url = new URL(location.href);
     if (view === "registry") url.searchParams.set("view", "registry");
     else ["view", "q", "kind", "category", "runtime", "access", "trust", "sort", "entry"].forEach(key => url.searchParams.delete(key));
     history.pushState(history.state, "", url); setWorkspaceView(view);
-    if (view === "registry" && notice?.text === "Run any code cell; required earlier cells run automatically.") setNotice(null);
+    if (view === "registry" && notice?.id === "welcome") setNotice(null);
   }
 
   function updateRegistryFilters(patch: Partial<RegistryViewState>) {
-    setRegistryFilters(current => ({ ...current, ...patch }));
+    setRegistryFilters(current => {
+      const next = { ...current, ...patch };
+      if (patch.kind && patch.kind !== "dataset") next.access = "all";
+      return next;
+    });
   }
 
-  function selectRegistryEntry(entry: RegistryEntry) {
-    setSelectedRegistryKey(registryEntryKey(entry));
-  }
+  const selectRegistryEntry = useCallback((entry: RegistryEntry | null) => setSelectedRegistryKey(entry ? registryEntryKey(entry) : ""), []);
 
   async function openRegistryLesson(entry: RegistryEntry) {
     const installed = catalog.find(item => item.id === entry.name);
     if (!installed) return;
+    if (lessonUpdateAvailable(installed, entry, location.href)) { setLessonUpdateEntry(entry); return; }
     await loadLesson(installed); navigateWorkspace("notebook");
+  }
+
+  async function openInstalledLesson(entry: CatalogEntry) {
+    const candidates = registryEntries.filter(item => item.kind === "lesson" && item.name === entry.id);
+    const registered = candidates[0] ? latestRegistryEntry(candidates, candidates[0].id) : undefined;
+    if (registered && lessonUpdateAvailable(entry, registered, location.href)) {
+      setLessonUpdateEntry(registered); return;
+    }
+    await loadLesson(entry);
   }
 
   async function copyRegistryCommand(entry: RegistryEntry) {
@@ -569,13 +791,92 @@ export default function App() {
     } catch { setNotice({ tone: "info", text: command }); }
   }
 
+  async function copyLessonLink(entry: RegistryEntry) {
+    const link = registryLessonShareUrl(location.href, entry.id, entry.version);
+    try {
+      await navigator.clipboard.writeText(link);
+      setNotice({ tone: "good", text: `Copied an exact-version link for ${entry.title}. Opening it will require an explicit install or run confirmation.` });
+    } catch { setNotice({ tone: "info", text: link }); }
+  }
+
+  async function copyCatalogueLink(entry: RegistryEntry) {
+    const link = publicRegistryUrl({}, registryEntryKey(entry));
+    try {
+      await navigator.clipboard.writeText(link);
+      setNotice({ tone: "good", text: `Copied the public catalogue page for ${entry.title}.` });
+    } catch { setNotice({ tone: "info", text: link }); }
+  }
+
+  async function copyChecksumLessonLink(entry: RegistryEntry) {
+    const link = manifestLessonShareUrl(location.href, entry.manifest, entry.manifestSha256);
+    try {
+      await navigator.clipboard.writeText(link);
+      setNotice({ tone: "good", text: `Copied a Studio link pinned directly to ${entry.title}'s manifest checksum.` });
+    } catch { setNotice({ tone: "info", text: link }); }
+  }
+
+  async function shareActiveLesson() {
+    if (!lesson) return;
+    const installed = catalog.find(item => item.id === lesson.id);
+    if (!installed) { setNotice({ tone: "bad", text: "This notebook is not associated with an installed lesson package." }); return; }
+    const registered = registryEntries.find(entry => entry.kind === "lesson" && entry.name === lesson.id &&
+      entry.manifestSha256.toLowerCase() === installed.manifestSha256?.toLowerCase());
+    const link = registered
+      ? registryLessonShareUrl(location.href, registered.id, registered.version)
+      : manifestLessonShareUrl(location.href, installed.manifest, installed.manifestSha256);
+    try {
+      await navigator.clipboard.writeText(link);
+      setNotice({ tone: "good", text: registered ? "Copied an exact registry lesson link." : "Copied a checksum-pinned direct lesson link." });
+    } catch { setNotice({ tone: "info", text: link }); }
+  }
+
+  function closeLessonLaunch() {
+    history.replaceState(history.state, "", removeLessonLaunchParams(location.href));
+    setLessonLaunchRequest(null); setLessonLaunchReview(null); setLessonLaunchError(""); setLessonLaunchLoading(false);
+  }
+
+  async function installSharedLesson(runAll: boolean) {
+    if (!lessonLaunchReview || lessonLaunchBusy) return;
+    setLessonLaunchBusy(true);
+    try {
+      const expectedHash = lessonLaunchReview.registryEntry?.manifestSha256 ?? lessonLaunchReview.observedSha256;
+      const expectedId = lessonLaunchReview.registryEntry?.name ?? lessonLaunchReview.manifest.id;
+      const installed = catalog.find(item => item.id === expectedId);
+      const sameInstalledRevision = Boolean(
+        installed?.manifestSha256 && expectedHash &&
+        installed.manifestSha256.toLowerCase() === expectedHash.toLowerCase(),
+      );
+      const manifest = await installFromManifest(
+        lessonLaunchReview.manifestUrl,
+        expectedHash,
+        expectedId,
+        !sameInstalledRevision,
+        lessonLaunchReview.registryEntry?.version,
+      );
+      closeLessonLaunch();
+      navigateWorkspace("notebook");
+      if (runAll) {
+        setPendingLaunchRunId(manifest.id);
+        setNotice({ tone: "good", text: `${manifest.title} was installed from the reviewed link. Studio will prepare its verified data and run all cells when the selected kernel is ready.` });
+      } else {
+        setNotice({ tone: "good", text: `${manifest.title} was checksum-verified, installed, and opened without running code.` });
+      }
+    } catch (error) {
+      setLessonLaunchError(error instanceof Error ? error.message : String(error));
+    } finally { setLessonLaunchBusy(false); }
+  }
+
   async function refreshVariables() {
     try { setVariables(await kernelRef.current!.listVariables()); } catch { setVariables([]); }
     finally { setVariableRevision(current => current + 1); }
   }
 
   async function runTo(end: number, restart = false) {
-    if (!kernelRef.current || running || kernelState !== "ready") return;
+    if (running) return;
+    if (!kernelRef.current || kernelState !== "ready") {
+      setNotice({ tone: "info", text: "BioLang is still starting. Run will be available when the kernel status changes to ready." });
+      return;
+    }
     if (pendingLessonData.length) {
       const names = pendingLessonData.map(dataset => dataset.path).join(", ");
       setNotice({ tone: "info", text: `Prepare the lesson data before running. BioLang cannot open ${names} until ${pendingLessonData.length === 1 ? "it is" : "they are"} downloaded, checksum-verified, and attached.` });
@@ -678,32 +979,40 @@ export default function App() {
     }
   }
 
-  async function loadLesson(entry: CatalogEntry, propagateError = false) {
+  async function loadLesson(entry: CatalogEntry, propagateError = false, openFresh = false) {
     try {
-      const existing = documents.find(document => document.lesson?.id === entry.id);
-      if (existing) { setActiveDocumentId(existing.id); return; }
+      const expectedRevision = entry.manifestSha256?.toLowerCase();
+      const existing = documents.find(document => document.lesson?.id === entry.id &&
+        (!expectedRevision || document.lessonManifestSha256?.toLowerCase() === expectedRevision));
+      if (existing && !openFresh) {
+        const remembered = collectionSelectionRef.current[collectionKey(existing)];
+        setActiveDocumentId(documents.some(document => document.id === remembered) ? remembered : existing.id);
+        return;
+      }
       const manifestUrl = new URL(entry.manifest, location.href);
       const manifestResponse = await fetch(manifestUrl, { credentials: "omit", referrerPolicy: "no-referrer" });
       if (!manifestResponse.ok) throw new Error(`Lesson manifest returned HTTP ${manifestResponse.status}.`);
       const manifestText = await manifestResponse.text();
       if (entry.manifestSha256) {
         const actual = await sha256(manifestText);
-        if (actual.toLowerCase() !== entry.manifestSha256.toLowerCase()) throw new Error("The lesson manifest changed and no longer matches its installed registry checksum.");
+        if (actual.toLowerCase() !== entry.manifestSha256.toLowerCase()) throw new Error("The lesson manifest no longer matches its installed registry checksum. Studio did not trust the changed content. Refresh the Registry and choose Update if a new checksum is available.");
       }
       const manifest = validateManifest(JSON.parse(manifestText), { allowLoopback: isLoopbackUrl(manifestUrl) });
       const lessonEntries = manifestLessonEntries(manifest);
       const openedDocuments = await Promise.all(lessonEntries.map(async lessonEntry => {
         const sourceResponse = await fetch(new URL(lessonEntry.entry, manifestUrl), { credentials: "omit", referrerPolicy: "no-referrer" });
         if (!sourceResponse.ok) throw new Error(`${lessonEntry.title} returned HTTP ${sourceResponse.status}.`);
-        return createNotebook(`${lessonEntry.id}.bln`, await sourceResponse.text(), manifest);
+        return createNotebook(`${lessonEntry.id}.bln`, await sourceResponse.text(), manifest, entry.manifestSha256);
       }));
       const states = Object.fromEntries(await Promise.all(manifest.datasets.map(async dataset => {
         const cached = await hasDataset(dataset);
         if (cached) {
           const file = await prepareDataset(dataset);
-          await Promise.all(openedDocuments.map(document => registerAttachment(
-            file, dataset.mediaType, { kind: "dataset", dataset }, { kind: "notebook", notebookId: document.id }, false,
-          )));
+          if (manifest.schema === 2) {
+            await registerAttachment(file, dataset.mediaType, { kind: "dataset", dataset }, { kind: "workspace" }, false);
+          } else {
+            await registerAttachment(file, dataset.mediaType, { kind: "dataset", dataset }, { kind: "notebook", notebookId: openedDocuments[0].id }, false);
+          }
         }
         return [dataset.id, cached];
       })));
@@ -711,10 +1020,56 @@ export default function App() {
       setDocuments(current => [...current, ...openedDocuments]); setActiveDocumentId(openedDocuments[0].id); needsResetRef.current = false;
       setNotice({ tone: "info", text: openedDocuments.length === 1
         ? `Opened ${manifest.title} in a new tab. Prepare its declared data before running.`
-        : `Opened ${manifest.title} as ${openedDocuments.length} ordered notebook tabs.` });
+        : `Opened ${manifest.title} as one lesson with ${openedDocuments.length} selectable sections.` });
     } catch (error) {
       setNotice({ tone: "bad", text: error instanceof Error ? error.message : String(error) });
       if (propagateError) throw error;
+    }
+  }
+
+  async function restoreOriginalLesson() {
+    if (!lesson) return;
+    const catalogEntry = catalog.find(entry => entry.id === lesson.id);
+    if (!catalogEntry) {
+      setNotice({ tone: "bad", text: "This lesson package is not installed. Reinstall it from the Registry before restoring its original notebook." });
+      return;
+    }
+    if (!window.confirm(`Restore ${filename} from ${lesson.title}?\n\nEdited cells and outputs in this notebook will be replaced. Prepared data and workspace attachments will remain available.`)) return;
+    try {
+      const manifestUrl = new URL(catalogEntry.manifest, location.href);
+      const manifestResponse = await fetch(manifestUrl, { credentials: "omit", referrerPolicy: "no-referrer" });
+      if (!manifestResponse.ok) throw new Error(`Lesson manifest returned HTTP ${manifestResponse.status}.`);
+      const manifestText = await manifestResponse.text();
+      if (catalogEntry.manifestSha256) {
+        const actual = await sha256(manifestText);
+        if (actual.toLowerCase() !== catalogEntry.manifestSha256.toLowerCase()) throw new Error("The lesson manifest no longer matches its installed registry checksum. Studio did not trust the changed content. Refresh the Registry and choose Update if a new checksum is available.");
+      }
+      const restoredManifest = validateManifest(JSON.parse(manifestText), { allowLoopback: isLoopbackUrl(manifestUrl) });
+      if (restoredManifest.id !== lesson.id) throw new Error(`The installed package now identifies itself as '${restoredManifest.id}', not '${lesson.id}'.`);
+      const lessonDocuments = documents.filter(document => document.lesson?.id === lesson.id);
+      const siblingIndex = Math.max(0, lessonDocuments.findIndex(document => document.id === activeDocumentId));
+      const originalEntry = lessonEntryForDocument(restoredManifest, filename, siblingIndex);
+      const sourceResponse = await fetch(new URL(originalEntry.entry, manifestUrl), { credentials: "omit", referrerPolicy: "no-referrer" });
+      if (!sourceResponse.ok) throw new Error(`${originalEntry.title} returned HTTP ${sourceResponse.status}.`);
+      const originalSource = await sourceResponse.text();
+      updateDocument(activeDocumentId, document => {
+        const { lastRun: _discardedRun, ...rest } = document;
+        return {
+          ...rest,
+          filename: `${originalEntry.id}.bln`,
+          cells: parseNotebook(originalSource),
+          lesson: restoredManifest,
+          lessonManifestSha256: catalogEntry.manifestSha256,
+          validThrough: -1,
+          dirty: Boolean(document.nativeFile),
+        };
+      });
+      needsResetRef.current = false;
+      setCollapsedSteps(new Set());
+      setKernelEpoch(current => current + 1);
+      setNotice({ tone: "good", text: `${originalEntry.title} was restored from its checksum-verified lesson package. Prepared data and attachments were kept.` });
+    } catch (error) {
+      setNotice({ tone: "bad", text: `Could not restore the lesson: ${error instanceof Error ? error.message : String(error)}` });
     }
   }
 
@@ -722,37 +1077,36 @@ export default function App() {
     setRegistrySource("loading"); setRegistryError("");
     try {
       const result = await fetchRegistry();
-      setRegistryEntries(result.index.entries); setRegistrySource(result.source);
+      setRegistryEntries(result.index.entries); setRegistrySource(result.source); setRegistryCheckedAt(result.checkedAt);
     } catch (error) {
-      setRegistryEntries([]); setRegistrySource("unavailable");
+      setRegistryEntries([]); setRegistrySource("unavailable"); setRegistryCheckedAt("");
       setRegistryError(error instanceof Error ? error.message : String(error));
     }
   }
 
-  async function installFromManifest(rawUrl: string, expectedHash?: string, expectedId?: string) {
-    const parsedUrl = new URL(rawUrl, location.href);
-    if (parsedUrl.protocol !== "https:" && !(parsedUrl.protocol === "http:" && isLoopbackUrl(parsedUrl))) throw new Error("Lesson manifests must use HTTPS (HTTP loopback URLs are allowed for local development).");
-    const manifestUrl = parsedUrl.href;
-    const response = await fetch(manifestUrl, { credentials: "omit", referrerPolicy: "no-referrer" });
-    if (!response.ok) throw new Error(`Lesson manifest returned HTTP ${response.status}.`);
-    const manifestText = await response.text();
-    if (expectedHash) {
-      const actual = await sha256(manifestText);
-      if (actual.toLowerCase() !== expectedHash.toLowerCase()) throw new Error("The lesson manifest failed its registry SHA-256 check.");
-    }
-    let decoded: unknown;
-    try { decoded = JSON.parse(manifestText); }
-    catch { throw new Error("Lesson manifest is not valid JSON."); }
-    const manifest = validateManifest(decoded, { allowLoopback: isLoopbackUrl(parsedUrl) });
-    if (expectedId && manifest.id !== expectedId) throw new Error(`Registry expected lesson '${expectedId}', but the manifest identifies '${manifest.id}'.`);
+  async function installFromManifest(rawUrl: string, expectedHash?: string, expectedId?: string, openFresh = false, version?: string) {
+    const inspected = await inspectLessonManifest(rawUrl, location.href, expectedHash, expectedId);
+    const { manifest, manifestUrl, observedSha256 } = inspected;
     const candidate: CatalogEntry = {
       id: manifest.id, title: manifest.title, summary: manifest.summary, manifest: manifestUrl,
-      runtime: manifest.runtime, tags: manifest.tags, manifestSha256: expectedHash
+      runtime: manifest.runtime, tags: manifest.tags, manifestSha256: observedSha256, version,
+      series: manifest.series
     };
-    await loadLesson(candidate, true);
-    const next = installLesson(manifest, manifestUrl, expectedHash);
+    await loadLesson(candidate, true, openFresh);
+    const next = installLesson(manifest, manifestUrl, observedSha256, version);
     setCatalog(next);
     return manifest;
+  }
+
+  function markLessonDatasetReady(datasetId: string) {
+    if (lesson?.schema !== 2) {
+      setDataReady(current => ({ ...current, [datasetId]: true }));
+      return;
+    }
+    const key = collectionKey(activeDocument);
+    setDocuments(current => current.map(document => collectionKey(document) === key
+      ? { ...document, dataReady: { ...document.dataReady, [datasetId]: true } }
+      : document));
   }
 
   async function prepare(id: string): Promise<boolean> {
@@ -767,15 +1121,15 @@ export default function App() {
           url: dataset.url, path: dataset.path, mediaType: dataset.mediaType,
           expectedBytes: dataset.bytes, expectedSha256: dataset.sha256,
         });
-        registerNativeReference(native, { kind: "dataset", dataset }, { kind: "notebook", notebookId: activeDocumentId });
-        setDataReady(current => ({ ...current, [id]: true }));
+        registerNativeReference(native, { kind: "dataset", dataset }, lesson?.schema === 2 ? { kind: "workspace" } : { kind: "notebook", notebookId: activeDocumentId });
+        markLessonDatasetReady(id);
         setNotice({ tone: "good", text: `${dataset.title} was streamed to private native storage, checksum-verified, and mounted as ${dataset.path}.` });
         return true;
       }
       setNotice({ tone: "info", text: `Downloading ${dataset.title} from its declared source…` });
       const file = await prepareDataset(dataset, loaded => setProgress(current => ({ ...current, [id]: loaded })));
-      await registerAttachment(file, dataset.mediaType, { kind: "dataset", dataset }, { kind: "notebook", notebookId: activeDocumentId });
-      setDataReady(current => ({ ...current, [id]: true }));
+      await registerAttachment(file, dataset.mediaType, { kind: "dataset", dataset }, lesson?.schema === 2 ? { kind: "workspace" } : { kind: "notebook", notebookId: activeDocumentId });
+      markLessonDatasetReady(id);
       setNotice({ tone: "good", text: `${dataset.title} is verified and ready as ${dataset.path}.` });
       return true;
     } catch (error) { setNotice({ tone: "bad", text: error instanceof Error ? error.message : String(error) }); return false; }
@@ -803,21 +1157,37 @@ export default function App() {
       setPackageOpen(false); setPackageUrl("");
       setNotice({ tone: "good", text: lessonCount === 1
         ? `${manifest.title} was added to this browser. Its data remains unprepared until you request it.`
-        : `${manifest.title} was added as ${lessonCount} ordered notebook tabs. Its data remains unprepared until you request it.` });
+        : `${manifest.title} was added as one lesson with ${lessonCount} selectable sections. Its data remains unprepared until you request it.` });
     } catch (error) { setNotice({ tone: "bad", text: error instanceof Error ? error.message : String(error) }); }
   }
 
   async function installRegistryEntry(entry: RegistryEntry) {
+    const updating = lessonUpdateAvailable(catalog.find(item => item.id === entry.name), entry, location.href);
     setInstallingId(entry.id);
     try {
-      const manifest = await installFromManifest(entry.manifest, entry.manifestSha256, entry.name);
+      const manifest = await installFromManifest(entry.manifest, entry.manifestSha256, entry.name, false, entry.version);
       const lessonCount = manifestLessonEntries(manifest).length;
-      setNotice({ tone: "good", text: lessonCount === 1
-        ? `${manifest.title} was checksum-verified and installed. Its data remains unprepared until you request it.`
-        : `${manifest.title} was checksum-verified and installed as ${lessonCount} ordered notebook tabs. Its data remains unprepared until you request it.` });
+      setNotice({ tone: "good", text: updating
+        ? `${manifest.title} was updated after its new registry checksum was verified. Existing notebooks and prepared data were kept.`
+        : lessonCount === 1
+          ? `${manifest.title} was checksum-verified and installed. Its data remains unprepared until you request it.`
+          : `${manifest.title} was checksum-verified and installed as one lesson with ${lessonCount} selectable sections. Its data remains unprepared until you request it.` });
       navigateWorkspace("notebook");
     } catch (error) { setNotice({ tone: "bad", text: error instanceof Error ? error.message : String(error) }); }
     finally { setInstallingId(""); }
+  }
+
+  async function confirmLessonUpdate() {
+    const entry = lessonUpdateEntry;
+    if (!entry) return;
+    await installRegistryEntry(entry);
+    setLessonUpdateEntry(null);
+  }
+
+  function installOrReviewRegistryEntry(entry: RegistryEntry) {
+    const installed = entry.kind === "lesson" ? catalog.find(item => item.id === entry.name) : undefined;
+    if (installed && lessonUpdateAvailable(installed, entry, location.href)) { setLessonUpdateEntry(entry); return; }
+    void installRegistryEntry(entry);
   }
 
   async function prepareRegistryDataset(entry: RegistryEntry, existingManifest?: RegisteredDatasetManifest) {
@@ -860,7 +1230,7 @@ export default function App() {
     const stored = installedLessons().find(item => item.id === entry.id);
     if (stored?.datasets) await Promise.all(stored.datasets.map(removeDataset));
     const remaining = uninstallLesson(entry.id); setCatalog(remaining);
-    setDocuments(current => current.map(document => document.lesson?.id === entry.id ? { ...document, lesson: null, dataReady: {}, dirty: true } : document));
+    setDocuments(current => current.map(document => document.lesson?.id === entry.id ? { ...document, lesson: null, lessonManifestSha256: undefined, dataReady: {}, dirty: true } : document));
     const retainedAttachments = workspaceAttachmentsRef.current.filter(attachment => attachment.source.kind !== "dataset" || !stored?.datasets?.some(dataset => dataset.sha256 === attachment.sha256));
     workspaceAttachmentsRef.current = retainedAttachments; setWorkspaceAttachments(retainedAttachments);
     setKernelEpoch(current => current + 1);
@@ -923,7 +1293,7 @@ export default function App() {
 
   function reviewUrlData() {
     try { validatedUrlDataDraft(); setUrlDataError(""); setUrlDataReview(true); }
-    catch (error) { const message = error instanceof Error ? error.message : String(error); setUrlDataError(message); setNotice({ tone: "bad", text: message }); }
+    catch (error) { setUrlDataError(error instanceof Error ? error.message : String(error)); }
   }
 
   function closeUrlData() {
@@ -954,7 +1324,7 @@ export default function App() {
       setNotice({ tone: "good", text: `${request.path} ${checked}, was cached, and is ready in ${request.scope.kind === "workspace" ? "all notebooks" : "this notebook"}.` });
       setUrlDataOpen(false); setUrlDataReview(false); setUrlDataDraft(EMPTY_URL_DATA); setUrlDataProgress(0); setUrlDataError("");
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error); setUrlDataError(message); setNotice({ tone: "bad", text: message });
+      setUrlDataError(error instanceof Error ? error.message : String(error));
     } finally { setUrlDataDownloading(false); }
   }
 
@@ -1142,6 +1512,46 @@ export default function App() {
     setNotice({ tone: "info", text: "Notebook variables are isolated. Saved outputs remain visible but replay before relying on them." });
   }
 
+  function switchDocumentGroup(group: DocumentTabGroup) {
+    if (group.documents.some(document => document.id === activeDocumentId) || running) return;
+    const remembered = collectionSelectionRef.current[group.key];
+    const target = group.documents.find(document => document.id === remembered) ?? group.documents[0];
+    switchNotebook(target.id);
+  }
+
+  function switchLessonSection(entryId: string) {
+    if (!lesson || lesson.schema !== 2 || running) return;
+    const target = documents.find(document => collectionKey(document) === collectionKey(activeDocument) &&
+      document.filename.replace(/\.bln$/i, "") === entryId);
+    if (target) switchNotebook(target.id);
+  }
+
+  function closeDocumentGroup(group: DocumentTabGroup) {
+    if (running) return;
+    if (group.documents.length === 1) { closeNotebook(group.documents[0].id); return; }
+    const dirty = group.documents.filter(document => document.dirty);
+    if (dirty.length && !window.confirm(`Close ${group.label} and its ${group.documents.length} sections?\n\n${dirty.length} section${dirty.length === 1 ? " has" : "s have"} unsaved changes.`)) return;
+    const closingIds = new Set(group.documents.map(document => document.id));
+    const declaredDatasetIds = new Set(group.documents[0].lesson?.datasets.map(dataset => dataset.id) ?? []);
+    const retainedAttachments = workspaceAttachmentsRef.current.filter(attachment =>
+      !(attachment.scope.kind === "workspace" && attachment.source.kind === "dataset" && declaredDatasetIds.has(attachment.source.dataset.id)) &&
+      (attachment.scope.kind === "workspace" || !closingIds.has(attachment.scope.notebookId)));
+    workspaceAttachmentsRef.current = retainedAttachments;
+    setWorkspaceAttachments(retainedAttachments);
+    const remaining = documents.filter(document => !closingIds.has(document.id));
+    setLastClosed(null);
+    if (!remaining.length) {
+      const replacement = createNotebook();
+      setDocuments([replacement]);
+      setActiveDocumentId(replacement.id);
+    } else {
+      setDocuments(remaining);
+      if (closingIds.has(activeDocumentId)) setActiveDocumentId(remaining[0].id);
+    }
+    delete collectionSelectionRef.current[group.key];
+    setNotice({ tone: "info", text: `Closed ${group.label}. Its sections were kept together as one lesson collection.` });
+  }
+
   function closeNotebook(id: string) {
     if (running) return;
     const closing = documents.find(document => document.id === id);
@@ -1219,6 +1629,39 @@ export default function App() {
     }
     setExportBusy(true);
     try {
+      if (format === "notebook" || format === "script" || format === "project") {
+        const projectExporter = await import("./export/lesson-project");
+        const input = {
+          filename: filename.trim() || "untitled.bln",
+          workspaceName: workspaceName.trim() || "BioLang workspace",
+          cells,
+          lesson,
+          lessonVersion: activeInstalledLesson?.version,
+          lessonManifestUrl: activeInstalledLesson?.manifest,
+          lessonManifestSha256: activeDocument.lessonManifestSha256 ?? activeInstalledLesson?.manifestSha256,
+        };
+        const base = projectExporter.safeProjectBase(input.filename);
+        let blob: Blob;
+        let downloadName: string;
+        if (format === "notebook") {
+          blob = new Blob([serializeNotebook(cells)], { type: "text/markdown;charset=utf-8" });
+          downloadName = `${base}.bln`;
+        } else if (format === "script") {
+          blob = new Blob([projectExporter.generatedBioLangScript(cells, `${base}.bln`)], { type: "text/plain;charset=utf-8" });
+          downloadName = `${base}.bl`;
+        } else {
+          const project = projectExporter.buildLessonProject(input);
+          blob = new Blob([project.bytes], { type: "application/zip" });
+          downloadName = project.filename;
+        }
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement("a");
+        anchor.href = url; anchor.download = downloadName; anchor.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        setExportOpen(false);
+        setNotice({ tone: "good", text: format === "notebook" ? "Downloaded the editable .bln notebook." : format === "script" ? "Downloaded the executable .bl script." : "Downloaded a CLI project with an integrity-checked data preparation lock." });
+        return;
+      }
       const report: NotebookReport = {
         workspaceName: workspaceName.trim() || "BioLang workspace", filename: filename.trim() || "untitled.bln",
         generatedAt: new Date().toISOString(), cells,
@@ -1253,6 +1696,7 @@ export default function App() {
     const restored = workspace.notebooks.map(notebook => ({
       id: notebook.id, filename: notebook.filename, cells: parseNotebook(notebook.source),
       lesson: notebook.lesson ? validateManifest(notebook.lesson) : null, validThrough: -1,
+      lessonManifestSha256: notebook.lessonManifestSha256,
       dataReady: notebook.dataReady ?? {}, dirty: false,
     }));
     pendingWorkspaceBaselineRef.current = Boolean(binding);
@@ -1366,6 +1810,48 @@ export default function App() {
     setCells(current => [...current, { id: crypto.randomUUID(), type, source: type === "code" ? "# BioLang code" : "Write what this step answers.", editing: true, status: "" }]);
   }
 
+  function insertCodeAfter(index: number) {
+    const insertion = index + 1;
+    needsResetRef.current = true;
+    setValidThrough(current => Math.min(current, index));
+    setCells(current => [
+      ...current.slice(0, insertion),
+      { id: crypto.randomUUID(), type: "code", source: "# BioLang code", editing: true, status: "" },
+      ...current.slice(insertion).map(cell => cell.type === "code" && cell.result ? { ...cell, status: "stale" as const } : cell),
+    ]);
+    requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>(`[data-cell-index="${insertion}"] textarea`)?.focus());
+  }
+
+  function moveCell(index: number, delta: -1 | 1) {
+    const target = index + delta;
+    if (target < 0 || target >= cells.length) return;
+    const affectsCode = cells[index].type === "code" || cells[target].type === "code";
+    const start = Math.min(index, target);
+    setCells(current => {
+      const next = [...current];
+      [next[index], next[target]] = [next[target], next[index]];
+      return affectsCode ? next.map((cell, position) => position >= start && cell.type === "code" && cell.result ? { ...cell, status: "stale" as const } : cell) : next;
+    });
+    if (affectsCode) { needsResetRef.current = true; setValidThrough(current => Math.min(current, start - 1)); }
+  }
+
+  function deleteCell(index: number) {
+    const cell = cells[index];
+    if (!cell || ((cell.source.trim() || cell.result) && !window.confirm(`Delete cell ${index + 1}? No undo is available.`))) return;
+    setCells(current => current.filter((_, position) => position !== index).map((item, position) =>
+      cell.type === "code" && position >= index && item.type === "code" && item.result ? { ...item, status: "stale" as const } : item));
+    if (cell.type === "code") { needsResetRef.current = true; setValidThrough(current => Math.min(current, index - 1)); }
+  }
+
+  async function copyCodeCell(cell: Cell, index: number) {
+    try {
+      await navigator.clipboard.writeText(cell.source);
+      setNotice({ tone: "good", text: `Copied BioLang code from cell ${index + 1}.` });
+    } catch {
+      setNotice({ tone: "bad", text: "The browser did not allow clipboard access. Select the code and copy it manually." });
+    }
+  }
+
   function addStep() {
     const source = '<!-- bl:step title="New step" -->\n\nExplain what this step answers.\n\n```biolang\n# BioLang code\n```\n\nExplain what the result means.\n\n<!-- /bl:step -->';
     setCells(current => [...current, { id: crypto.randomUUID(), type: "markdown", source, editing: true, status: "" }]);
@@ -1406,17 +1892,24 @@ export default function App() {
       : cell.status === "skipped" ? { glyph: "↻", label: "Run again", state: "Skipped" }
       : { glyph: "▶", label: "Run", state: "Not run" };
     return <article className={`cell cell-${cell.type} ${cell.status ?? ""}`} data-cell-index={index} key={cell.id}>
-      <div className="cell-rail">{cell.type === "code" ? <><button aria-label={`${runAction.label} cell ${index + 1}`} title={`${runAction.label}; required earlier cells run automatically`} disabled={running} onClick={() => void runTo(index)}>{runAction.glyph}</button><small>{index + 1}</small><em>{runAction.state}</em></> : <><span>¶</span><small>{index + 1}</small></>}</div>
+      <div className="cell-rail">{cell.type === "code" ? <><button aria-label={`${runAction.label} cell ${index + 1}`} title={cell.status === "done" ? "Run again from a clean interpreter; earlier cells will replay" : `${runAction.label}; required earlier cells run automatically`} disabled={running || kernelState !== "ready"} onClick={() => void runTo(index)}>{runAction.glyph}</button><small>{index + 1}</small><em>{runAction.state}</em></> : <><span>¶</span><small>{index + 1}</small></>}</div>
       <div className="cell-body">
-        {cell.type === "markdown" && !cell.editing ? <><button className="markdown-edit-action" onClick={() => updateCell(index, { editing: true })}>Edit</button><div className="prose" onDoubleClick={() => updateCell(index, { editing: true })}><ReactMarkdown remarkPlugins={[remarkGfm]} components={MARKDOWN_COMPONENTS}>{cell.source}</ReactMarkdown></div></> : <textarea aria-label={`${cell.type} cell ${index + 1}`} className={cell.type === "code" ? "code-editor" : "markdown-editor"} value={cell.source} spellCheck={cell.type === "markdown"} onChange={event => updateCell(index, { source: event.target.value })} onBlur={() => cell.type === "markdown" && finishMarkdownCell(index)}/>}
+        {cell.type === "code" && <button className="cell-copy-action" aria-label={`Copy code from cell ${index + 1}`} title="Copy this BioLang code" disabled={!cell.source} onClick={() => void copyCodeCell(cell, index)}>Copy</button>}
+        {cell.type === "markdown" && !cell.editing ? <><button className="markdown-edit-action" onClick={() => editMarkdown(index)}>Edit</button><MarkdownView source={cell.source} index={index} edit={editMarkdown}/></> : <AutoGrowTextarea label={`${cell.type} cell ${index + 1}`} className={cell.type === "code" ? "code-editor" : "markdown-editor"} value={cell.source} spellCheck={cell.type === "markdown"} change={source => updateCell(index, { source })} blur={() => cell.type === "markdown" && finishMarkdownCell(index)} run={cell.type === "code" ? advance => {
+          void runTo(index);
+          if (advance) requestAnimationFrame(() => [...document.querySelectorAll<HTMLTextAreaElement>("article.cell-code textarea")].find(editor => Number(editor.closest("article")?.dataset.cellIndex) > index)?.focus());
+        } : undefined}/>}
         {cell.type === "code" && <ResultView result={cell.result} />}
       </div>
-      <div className="cell-actions"><button aria-label={`Move cell ${index + 1} up`} title="Move cell up" disabled={index === 0} onClick={() => { needsResetRef.current = true; setValidThrough(-1); setCells(current => current.map((item, position) => position === index - 1 ? current[index] : position === index ? current[index - 1] : item).map(item => item.type === "code" && item.result ? { ...item, status: "stale" } : item)); }}>↑</button><button aria-label={`Delete cell ${index + 1}`} title="Delete cell" onClick={() => {
-        if ((cell.source.trim() || cell.result) && !window.confirm(`Delete cell ${index + 1}? This cannot be undone after you leave the notebook.`)) return;
-        needsResetRef.current = true; setValidThrough(-1);
-        setCells(current => current.filter((_, position) => position !== index).map(item => item.type === "code" && item.result ? { ...item, status: "stale" } : item));
-      }}>×</button></div>
+      <div className="cell-actions"><button aria-label={`Move cell ${index + 1} up`} title="Move cell up" disabled={index === 0} onClick={() => moveCell(index, -1)}>↑</button><button aria-label={`Move cell ${index + 1} down`} title="Move cell down" disabled={index === cells.length - 1} onClick={() => moveCell(index, 1)}>↓</button><button aria-label={`Insert code after cell ${index + 1}`} title="Insert code cell below" onClick={() => insertCodeAfter(index)}>＋</button><button aria-label={`Delete cell ${index + 1}`} title="Delete cell" onClick={() => deleteCell(index)}>×</button></div>
     </article>;
+  }
+
+  function renderInstalledLesson(item: CatalogEntry) {
+    const exactRegistryEntry = registryEntries.find(entry => entry.kind === "lesson" && entry.name === item.id && entry.manifestSha256.toLowerCase() === item.manifestSha256?.toLowerCase());
+    const version = item.version ?? exactRegistryEntry?.version;
+    const updateAvailable = outdatedInstalledNames.has(item.id);
+    return <div className={`lesson-row ${lesson?.id === item.id ? "active" : ""}`} key={item.id}><button className="lesson-link" title={`Open ${item.title}`} onClick={() => void openInstalledLesson(item)}><strong>{item.series?.chapter || item.title}</strong><small className="lesson-meta"><span title={version ? `Installed version ${version}` : "A lesson added from a custom or local manifest"}>{version ? `v${version}` : "Local"}</span>{updateAvailable && <em title="A registry update is available"><i aria-hidden="true"/>Update</em>}</small></button><button className="lesson-info" aria-label={`About ${item.title}`} title="Lesson details" onClick={() => setLessonInfo({ ...item, version })}>i</button><button className="remove-package" title={`Remove ${item.title}`} onClick={() => void removePackage(item)}>×</button></div>;
   }
 
   return <div className={`app-shell ${workspaceView === "registry" ? "registry-mode" : ""}`}>
@@ -1429,11 +1922,12 @@ export default function App() {
       <nav className="toolbar">
         {workspaceView === "notebook" && <button onClick={() => setStatisticsGuideOpen(true)}>Guided stats</button>}
         {workspaceView === "notebook" ? <><button onClick={newNotebook}>New</button><button onClick={openFile}>Open</button><button onClick={saveFile}>Save</button><button onClick={() => setExportOpen(true)}>Export</button>{nativeDocumentsAvailable() && <button onClick={() => void saveDesktopNotebook(true)}>Save as…</button>}<details className="workspace-file-menu"><summary>Workspace{workspaceDirty ? " ●" : ""}</summary><div><button onClick={event => { openWorkspace(); event.currentTarget.closest("details")?.removeAttribute("open"); }}>Open .blw</button><button onClick={event => { saveWorkspaceFile(); event.currentTarget.closest("details")?.removeAttribute("open"); }}>{nativeDocumentsAvailable() ? "Save .blw" : "Export .blw"}</button>{nativeDocumentsAvailable() && <button onClick={event => { saveWorkspaceFile(true); event.currentTarget.closest("details")?.removeAttribute("open"); }}>Save .blw as…</button>}<button disabled={!activeDocument.lastRun} onClick={event => { saveRunRecord(); event.currentTarget.closest("details")?.removeAttribute("open"); }}>Export latest run record</button>{recentNativeDocuments.length > 0 && <div className="recent-native"><small>Recent Desktop files</small>{recentNativeDocuments.map(recent => <button key={recent.path} title={recent.path} onClick={event => { openRecentDocument(recent); event.currentTarget.closest("details")?.removeAttribute("open"); }}><span>{recent.filename}</span><em>{recent.kind}</em></button>)}</div>}</div></details>
-          <button className="primary" disabled={running || codeCount === 0} onClick={() => pendingLessonData.length ? void prepareAndRunAll() : void runTo(cells.length - 1, true)}>▶ {pendingLessonData.length ? "Prepare & run all" : "Run all"}</button>
+          <button className="primary" disabled={running || codeCount === 0 || kernelState !== "ready"} title={kernelState !== "ready" ? "BioLang is still starting" : undefined} onClick={() => pendingLessonData.length ? void prepareAndRunAll() : void runTo(cells.length - 1, true)}>▶ {pendingLessonData.length ? "Prepare & run all" : "Run all"}</button>
           {running && <button onClick={() => void stopRun()}>Stop</button>}</> : <button onClick={() => void refreshRegistry()}>Refresh registry</button>}
       </nav>
       <div className="kernel-switch">
-        <label>Kernel<select value={kernelKind} disabled={running} onChange={event => {
+        <label>Theme<select className="theme-select" aria-label="Color theme" value={colorTheme} onChange={event => setColorTheme(event.target.value as StudioTheme)}><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
+        <label>Kernel<select aria-label="Kernel" value={kernelKind} disabled={running} onChange={event => {
           const next = event.target.value as KernelKind;
           if (next === "somer") { setRemoteOpen(true); return; }
           if (next === "desktop") { event.currentTarget.value = kernelKind; useDesktopKernel(); return; }
@@ -1447,10 +1941,13 @@ export default function App() {
       <section className="discover"><div className="section-head"><h2>Discover</h2><button title="Refresh registry" onClick={() => void refreshRegistry()}>↻</button></div>
         <div className="discover-summary"><strong>{registrySource === "loading" ? "Checking registry…" : registrySource === "unavailable" ? "Registry unavailable" : `${registryEntries.length} registered item${registryEntries.length === 1 ? "" : "s"}`}</strong><span>{registrySource === "cache" ? "Using the verified offline cache." : "Browse lessons, datasets, workflows and tools."}</span><button onClick={() => navigateWorkspace("registry")}>Browse registry</button></div>
       </section>
-      <section><div className="section-head"><h2>Installed lessons</h2><button title="Add lesson package" onClick={() => setPackageOpen(true)}>＋</button></div>{catalog.length ? catalog.map(item => <div className={`lesson-row ${lesson?.id === item.id ? "active" : ""}`} key={item.id}><button className="lesson-link" onClick={() => void loadLesson(item)}><strong>{item.title}</strong><span>{item.summary}</span></button><button className="remove-package" title={`Remove ${item.title}`} onClick={() => void removePackage(item)}>×</button></div>) : <div className="empty-catalog"><p>No lesson packages installed.</p><button onClick={() => setPackageOpen(true)}>Add from manifest URL</button></div>}</section>
-      <section><h2>Data</h2>{lesson ? lesson.datasets.map(dataset => <div className={`dataset ${dataReady[dataset.id] ? "ready" : "needs-prepare"}`} key={dataset.id}><div><strong>{dataset.title}</strong><span>{dataReady[dataset.id] ? `${displayBytes(dataset.bytes)} · ready for this notebook` : `${displayBytes(dataset.bytes)} · checksum verified when prepared`}</span></div><button disabled={dataReady[dataset.id]} onClick={() => void prepare(dataset.id)}>{dataReady[dataset.id] ? "Ready" : progress[dataset.id] ? `${Math.round(progress[dataset.id] / dataset.bytes * 100)}%` : "Prepare"}</button></div>) : <p className="muted">A lesson can declare the exact data it needs.</p>}
+      <section><div className="section-head"><h2>Installed lessons <small>{catalog.length}</small></h2><button title="Add lesson package" onClick={() => setPackageOpen(true)}>＋</button></div>{catalog.length ? <div className="installed-lesson-list">
+        {lessonSeries.groups.map(group => <details className="lesson-series" open key={group.id}><summary><strong>{group.title}</strong><small>{group.items.length}</small></summary><div className="lesson-series-head"><span>Book series</span><a href={group.url} target="_blank" rel="noreferrer">Source ↗</a></div>{group.items.map(renderInstalledLesson)}</details>)}
+        {lessonSeries.standalone.map(renderInstalledLesson)}
+      </div> : <div className="empty-catalog"><p>No lesson packages installed.</p><button onClick={() => setPackageOpen(true)}>Add from manifest URL</button></div>}</section>
+      <section><h2>Data <small>{(lesson?.datasets.length ?? 0) + visibleUserAttachments.length}</small></h2><div className="sidebar-data-list">{lesson ? lesson.datasets.map(dataset => <div className={`dataset ${dataReady[dataset.id] ? "ready" : "needs-prepare"}`} key={dataset.id}><div><strong>{dataset.title}</strong><span>{dataReady[dataset.id] ? `${displayBytes(dataset.bytes)} · ready` : `${displayBytes(dataset.bytes)} · not prepared`}</span></div><button disabled={dataReady[dataset.id]} onClick={() => void prepare(dataset.id)}>{dataReady[dataset.id] ? "Ready" : progress[dataset.id] ? `${Math.round(progress[dataset.id] / dataset.bytes * 100)}%` : "Prepare"}</button></div>) : <p className="muted">A lesson can declare the exact data it needs.</p>}
         {visibleUserAttachments.map(attachment => <div className={`attached-data ${missingAttachmentIds.has(attachment.id) ? "missing" : ""}`} key={attachment.id}><div><strong>{attachment.path}</strong><span title={attachment.source.kind === "url" ? attachment.source.url : attachment.source.kind === "output" ? `Published from ${attachment.source.producerNotebookFilename}: ${attachment.source.variable}` : undefined}>{missingAttachmentIds.has(attachment.id) ? "needs data · " : `${displayBytes(attachment.size)} · `}{attachment.scope.kind === "workspace" ? "all notebooks" : "this notebook"}{attachment.source.kind === "url" ? " · HTTPS source" : attachment.source.kind === "output" ? ` · output from ${attachment.source.producerNotebookFilename}` : ""}</span></div>{missingAttachmentIds.has(attachment.id) && <button onClick={() => void prepareReferencedAttachment(attachment)}>{attachment.source.kind === "local" || attachment.source.kind === "output" ? "Reattach" : "Prepare"}</button>}<button onClick={() => changeAttachmentScope(attachment)}>{attachment.scope.kind === "workspace" ? "Keep here" : "Share"}</button><button aria-label={`Detach ${attachment.path}`} title="Detach without deleting cached source data" onClick={() => removeAttachmentFromWorkspace(attachment)}>×</button></div>)}
-        <div className="data-actions"><button onClick={() => {
+        </div><div className="data-actions"><button onClick={() => {
           if (kernelKind === "desktop") void attachNativeFiles().catch(error => setNotice({ tone: "bad", text: error instanceof Error ? error.message : String(error) }));
           else { reattachTargetRef.current = null; fileInput.current?.click(); }
         }}>Attach local</button><button onClick={() => { setUrlDataReview(false); setUrlDataError(""); setUrlDataOpen(true); }}>From URL…</button></div>
@@ -1460,29 +1957,48 @@ export default function App() {
       <section className="storage-section"><details className={`storage-disclosure ${localStorageStatus.quota && localStorageStatus.usage / localStorageStatus.quota >= .8 ? "warning" : ""}`}><summary><span>Local storage</span><small>{displayBytes(localStorageStatus.usage)}</small></summary><div className="storage-meter" role="meter" aria-label="Browser storage used" aria-valuemin={0} aria-valuemax={localStorageStatus.quota || 1} aria-valuenow={localStorageStatus.usage}><i style={{ width: `${localStorageStatus.quota ? Math.min(100, localStorageStatus.usage / localStorageStatus.quota * 100) : 0}%` }}/></div><p className="muted">{displayBytes(localStorageStatus.usage)} used{localStorageStatus.quota ? ` of ${displayBytes(localStorageStatus.quota)}` : ""} · {localStorageStatus.persistent ? "protected from automatic eviction" : "browser-managed"}</p><div><button onClick={() => void refreshStorageStatus()}>Refresh</button>{!localStorageStatus.persistent && <button onClick={() => void protectLocalStorage()}>Protect</button>}<button className="danger" onClick={() => void clearCachedWorkspaceData()}>Clear cached data</button></div></details></section>
     </aside>}
     {workspaceView === "notebook" ? <main>
-      <div className="document-tabs"><input aria-label="Workspace name" value={workspaceName} onChange={event => setWorkspaceName(event.target.value)} /><div role="tablist" aria-label="Open notebooks">{documents.map(document => <div className={`document-tab ${document.id === activeDocumentId ? "active" : ""}`} key={document.id}><button role="tab" aria-selected={document.id === activeDocumentId} onClick={() => switchNotebook(document.id)}><span>{document.filename}</span>{document.dirty && <i title="Unsaved changes">●</i>}</button><button aria-label={`Close ${document.filename}`} onClick={() => closeNotebook(document.id)}>×</button></div>)}</div><button title="New notebook" aria-label="New notebook" onClick={newNotebook}>＋</button>{lastClosed && <button className="reopen-tab" onClick={reopenNotebook}>Reopen closed</button>}</div>
-      <div className="document-head"><div><input aria-label="Notebook name" value={filename} onChange={event => setFilename(event.target.value)} /><span>{cells.length} cells · {codeCount} runnable{codeCount ? ` · ${currentCodeCount === codeCount ? "all current" : `${currentCodeCount} current`}` : ""}</span></div>{lesson && <a href={lesson.source.url} target="_blank" rel="noreferrer">Inspired by {lesson.source.title} ↗</a>}</div>
-      {notice && <div className={`notice notice-${notice.tone}`}>{notice.text}</div>}
+      <div className="document-tabs"><input aria-label="Workspace name" value={workspaceName} onChange={event => setWorkspaceName(event.target.value)} /><div role="tablist" aria-label="Open notebooks">{documentTabGroups.map(group => {
+        const active = group.documents.some(document => document.id === activeDocumentId);
+        const dirty = group.documents.some(document => document.dirty);
+        return <div className={`document-tab ${group.collection ? "collection" : ""} ${active ? "active" : ""}`} key={group.key}><button role="tab" aria-selected={active} onClick={() => switchDocumentGroup(group)}><span>{group.label}</span>{group.collection && <b title={`${group.documents.length} lesson sections`}>{group.documents.length}</b>}{dirty && <i title="Unsaved changes">●</i>}</button><button aria-label={`Close ${group.label}`} onClick={() => closeDocumentGroup(group)}>×</button></div>;
+      })}</div><button title="New notebook" aria-label="New notebook" onClick={newNotebook}>＋</button>{lastClosed && <button className="reopen-tab" onClick={reopenNotebook}>Reopen closed</button>}</div>
+      <div className="document-head"><div>{activeCollectionEntry ? <div className="collection-heading"><span className="collection-eyebrow">{lesson!.title}</span><div><button aria-label="Previous lesson section" title="Previous section" disabled={activeCollectionIndex <= 0 || running} onClick={() => switchLessonSection(activeCollectionEntries[activeCollectionIndex - 1].id)}>←</button><label><span>Section {activeCollectionIndex + 1} of {activeCollectionEntries.length}</span><select aria-label="Lesson section" value={activeCollectionEntry.id} disabled={running} onChange={event => switchLessonSection(event.target.value)}>{activeCollectionEntries.map(entry => <option key={entry.id} value={entry.id}>{entry.title}</option>)}</select></label><button aria-label="Next lesson section" title="Next section" disabled={activeCollectionIndex >= activeCollectionEntries.length - 1 || running} onClick={() => switchLessonSection(activeCollectionEntries[activeCollectionIndex + 1].id)}>→</button></div><small>{activeCollectionEntry.summary}</small></div> : <><input aria-label="Notebook name" value={filename} onChange={event => setFilename(event.target.value)} /><span>{cells.length} cells · {codeCount} runnable{codeCount ? ` · ${currentCodeCount === codeCount ? "all current" : `${currentCodeCount} current`}` : ""}</span></>}</div>{lesson && <div className="document-provenance">
+        {previousSeriesLesson && <button title={previousSeriesLesson.title} onClick={() => void openInstalledLesson(previousSeriesLesson)}>← Previous chapter</button>}
+        {nextSeriesLesson && <button title={nextSeriesLesson.title} onClick={() => void openInstalledLesson(nextSeriesLesson)}>Next chapter →</button>}
+        <details className="notebook-provenance"><summary>Provenance</summary><div><dl>
+          <div><dt>Source</dt><dd><a href={lesson.source.url} target="_blank" rel="noreferrer">{lesson.source.title} ↗</a></dd></div>
+          <div><dt>Lesson</dt><dd>{activeInstalledLesson?.version ? `v${activeInstalledLesson.version}` : "custom"}{activeDocument.dirty ? " · locally modified" : " · original source"}</dd></div>
+          {activeRegistryLesson && <><div><dt>Licence</dt><dd>{activeRegistryLesson.licence}</dd></div><div><dt>Validation</dt><dd>{activeRegistryLesson.validation}</dd></div></>}
+          <div><dt>Manifest SHA-256</dt><dd><code>{activeDocument.lessonManifestSha256 ?? activeInstalledLesson?.manifestSha256 ?? "Not recorded"}</code></dd></div>
+          <div><dt>Declared data</dt><dd>{lesson.datasets.length ? `${lesson.datasets.length} checksum-pinned file${lesson.datasets.length === 1 ? "" : "s"}` : "None"}</dd></div>
+          <div><dt>Latest run</dt><dd>{activeDocument.lastRun ? `${activeDocument.lastRun.success ? "Successful" : "Failed"} · ${activeDocument.lastRun.runtime.runtime} · ${activeDocument.lastRun.finishedAt}` : "Not run in this workspace"}</dd></div>
+        </dl>{lesson.datasets.length > 0 && <details><summary>Dataset checksums</summary>{lesson.datasets.map(dataset => <code key={dataset.id}>{dataset.path} · {dataset.sha256}</code>)}</details>}</div></details>
+        <details className="notebook-share"><summary>Share…</summary><div>{activeRegistryLesson && <button onClick={() => void copyCatalogueLink(activeRegistryLesson)}>Copy catalogue link</button>}<button onClick={() => void shareActiveLesson()}>Copy Studio link</button>{activeRegistryLesson && <button onClick={() => void copyChecksumLessonLink(activeRegistryLesson)}>Copy checksum link</button>}</div></details><button title="Replace edited cells and outputs with the lesson package version; prepared data is kept" onClick={() => void restoreOriginalLesson()}>Restore original</button>
+      </div>}</div>
+      {notice && <div className={`notice notice-${notice.tone}`} role={notice.tone === "bad" ? "alert" : "status"} aria-live={notice.tone === "bad" ? "assertive" : "polite"}><span>{notice.text}</span><button aria-label="Dismiss message" onClick={() => setNotice(null)}>×</button></div>}
       {(notebookChangedExternally || workspaceChangedExternally) && <div className="external-change" role="alert"><div><strong>Changed outside Studio</strong><span>Reload the disk version, or Save and explicitly confirm an overwrite.</span></div>{notebookChangedExternally && activeDocument.nativeFile && <button onClick={() => void openDesktopNotebook(activeDocument.nativeFile!.path, true)}>Reload notebook</button>}{workspaceChangedExternally && workspaceNativeFile && <button onClick={() => void openDesktopWorkspace(workspaceNativeFile.path, true)}>Reload workspace</button>}</div>}
       <div className="cells">{pendingLessonData.length > 0 && <div className="data-preflight" role="alert"><div><strong>Prepare data before running</strong><span>This lesson needs {pendingLessonData.length} file{pendingLessonData.length === 1 ? "" : "s"}. Browser BioLang can only open them after they are downloaded, verified, and attached.</span></div><button className="primary" onClick={() => void prepareAllLessonData()}>Prepare {pendingLessonData.length === 1 ? "data" : `all ${pendingLessonData.length} files`}</button></div>}{displayBlocks.map(block => block.step ? <section className={`lesson-step ${collapsedSteps.has(block.step.id) ? "collapsed" : ""}`} key={block.key}>
         <header className="lesson-step-head"><div><span>Lesson step</span><strong>{block.step.title || "Untitled step"}</strong><small>{block.items.filter(item => item.cell.type === "code").length} runnable</small></div><div><button disabled={running || !block.items.some(item => item.cell.type === "code")} onClick={() => void runTo(block.items.at(-1)!.index)}>▶ Run step</button><button onClick={() => editStep(block.items)}>Edit source</button><button aria-label={`${collapsedSteps.has(block.step.id) ? "Expand" : "Collapse"} ${block.step.title || "lesson step"}`} onClick={() => setCollapsedSteps(current => { const next = new Set(current); if (next.has(block.step!.id)) next.delete(block.step!.id); else next.add(block.step!.id); return next; })}>{collapsedSteps.has(block.step.id) ? "▸" : "▾"}</button></div></header>
         {!collapsedSteps.has(block.step.id) && <div className="lesson-step-cells">{block.items.map(({ cell, index }) => renderCell(cell, index))}</div>}
       </section> : block.items.map(({ cell, index }) => renderCell(cell, index)))}</div>
       <div className="add-cells"><button onClick={() => addCell("code")}>+ Code</button><button onClick={() => addCell("markdown")}>+ Explanation</button><button onClick={addStep}>+ Step</button></div>
-    </main> : <RegistryWorkspace entries={registryEntries} source={registrySource} error={registryError} filters={registryFilters} selectedKey={selectedRegistryKey} installedLessons={installedLessonNames} preparedDatasets={preparedRegistryDatasets} installingId={installingId} datasetDetails={registryDatasetDetails} detailLoading={registryDetailLoading} detailError={registryDetailError} notice={notice} onFiltersChange={updateRegistryFilters} onSelect={selectRegistryEntry} onRefresh={() => void refreshRegistry()} onInstall={entry => void installRegistryEntry(entry)} onOpenLesson={entry => void openRegistryLesson(entry)} onPrepare={(entry, details) => void prepareRegistryDataset(entry, details)} onCopyCommand={entry => void copyRegistryCommand(entry)}/>}
+    </main> : <RegistryWorkspace entries={registryEntries} source={registrySource} checkedAt={registryCheckedAt} error={registryError} filters={registryFilters} selectedKey={selectedRegistryKey} installedLessons={installedLessonKeys} outdatedLessons={outdatedLessonKeys} openLessons={openLessonKeys} modifiedLessons={modifiedLessonKeys} preparedDatasets={preparedRegistryDatasets} installingId={installingId} datasetDetails={registryDatasetDetails} detailLoading={registryDetailLoading} detailError={registryDetailError} notice={notice} onDismissNotice={() => setNotice(null)} onFiltersChange={updateRegistryFilters} onSelect={selectRegistryEntry} onRefresh={() => void refreshRegistry()} onInstall={installOrReviewRegistryEntry} onOpenLesson={entry => void openRegistryLesson(entry)} onShareLesson={entry => void copyLessonLink(entry)} onCopyCatalogueLink={entry => void copyCatalogueLink(entry)} onCopyChecksumLink={entry => void copyChecksumLessonLink(entry)} onPrepare={(entry, details) => void prepareRegistryDataset(entry, details)} onCopyCommand={entry => void copyRegistryCommand(entry)}/>}
     <input hidden ref={fileInput} type="file" multiple onChange={event => { const input = event.currentTarget; void attachFiles(input.files).catch(error => setNotice({ tone: "bad", text: error.message })).finally(() => { input.value = ""; }); }}/>
     <input hidden ref={notebookInput} type="file" accept=".bln,.md,.bl.md" onChange={event => { const input = event.currentTarget; const file = input.files?.[0]; input.value = ""; void openBrowserFile(file); }}/>
     <input hidden ref={workspaceInput} type="file" accept=".blw,application/json" onChange={event => { const input = event.currentTarget; const file = input.files?.[0]; input.value = ""; void openWorkspaceFile(file).catch(error => setNotice({ tone: "bad", text: error instanceof Error ? error.message : String(error) })); }}/>
-    {remoteOpen && <div className="modal-backdrop"><form className="modal" onSubmit={event => { event.preventDefault(); setKernelKind("somer"); setRemoteOpen(false); }}><h2>Connect to SOMER</h2><p>The token stays in memory and is never saved by Studio.</p><label>Server URL<input required type="url" value={remoteUrl} onChange={event => setRemoteUrl(event.target.value)} placeholder="https://compute.example.org" /></label><label>Bearer token<input required type="password" value={remoteToken} onChange={event => setRemoteToken(event.target.value)} /></label><div><button type="button" onClick={() => setRemoteOpen(false)}>Cancel</button><button className="primary" type="submit">Connect</button></div></form></div>}
-    {packageOpen && <div className="modal-backdrop"><form className="modal" onSubmit={event => { event.preventDefault(); void addPackage(); }}><h2>Add a lesson package</h2><p>Paste an HTTPS lesson manifest URL, or an HTTP localhost URL while developing locally. Custom manifests are validated but do not carry the registry's manifest checksum. Declared datasets are downloaded separately only when you choose Prepare.</p><label>Manifest URL<input required type="url" value={packageUrl} onChange={event => setPackageUrl(event.target.value)} placeholder="https://example.org/lesson.json" /></label><div><button type="button" onClick={() => setPackageOpen(false)}>Cancel</button><button className="primary" type="submit">Add lesson</button></div></form></div>}
+    {remoteOpen && <DialogShell label="Connect to SOMER" close={() => setRemoteOpen(false)}><form className="modal" onSubmit={event => { event.preventDefault(); setKernelKind("somer"); setRemoteOpen(false); }}><h2>Connect to SOMER</h2><p>The token stays in memory and is never saved by Studio.</p><label>Server URL<input autoFocus required type="url" value={remoteUrl} onChange={event => setRemoteUrl(event.target.value)} placeholder="https://compute.example.org" /></label><label>Bearer token<input required type="password" value={remoteToken} onChange={event => setRemoteToken(event.target.value)} /></label><div><button type="button" onClick={() => setRemoteOpen(false)}>Cancel</button><button className="primary" type="submit">Connect</button></div></form></DialogShell>}
+    {packageOpen && <DialogShell label="Add a lesson package" close={() => setPackageOpen(false)}><form className="modal" onSubmit={event => { event.preventDefault(); void addPackage(); }}><h2>Add a lesson package</h2><p>Paste an HTTPS lesson manifest URL, or an HTTP localhost URL while developing locally. Custom manifests are validated and pinned to the checksum Studio observes. Declared datasets are downloaded separately only when you choose Prepare.</p><label>Manifest URL<input autoFocus required type="url" value={packageUrl} onChange={event => setPackageUrl(event.target.value)} placeholder="https://example.org/lesson.json" /></label><div><button type="button" onClick={() => setPackageOpen(false)}>Cancel</button><button className="primary" type="submit">Add lesson</button></div></form></DialogShell>}
+    {lessonInfo && <DialogShell label={`About ${lessonInfo.title}`} close={() => setLessonInfo(null)}><section className="modal lesson-info-modal"><span className="modal-eyebrow">Installed lesson</span><h2>{lessonInfo.title}</h2><p>{lessonInfo.summary || "No short description was supplied."}</p><dl><div><dt>Version</dt><dd>{lessonInfo.version ? `v${lessonInfo.version}` : "Custom or legacy install"}</dd></div><div><dt>Runtime</dt><dd>{lessonInfo.runtime}</dd></div>{lessonInfo.series && <><div><dt>Book</dt><dd><a href={lessonInfo.series.url} target="_blank" rel="noreferrer">{lessonInfo.series.title} ↗</a></dd></div><div><dt>Chapter</dt><dd>{lessonInfo.series.chapter}</dd></div></>}</dl>{lessonInfo.tags.length > 0 && <div className="lesson-info-tags">{lessonInfo.tags.map(tag => <span key={tag}>{tag}</span>)}</div>}<div><button onClick={() => setLessonInfo(null)}>Close</button><button className="primary" onClick={() => { const selected = lessonInfo; setLessonInfo(null); void openInstalledLesson(selected); }}>Open lesson</button></div></section></DialogShell>}
     {statisticsGuideOpen && <StatisticsGuideDialog close={() => setStatisticsGuideOpen(false)} create={createGuidedStatisticsNotebook}/>}
     {exportOpen && <ExportNotebookDialog issues={exportIssues} busy={exportBusy} close={() => setExportOpen(false)} submit={(format, options) => void exportNotebook(format, options)}/>}
-    {urlDataOpen && <div className="modal-backdrop"><form className="modal url-data-modal" onSubmit={event => { event.preventDefault(); if (urlDataReview) void downloadUrlData(); else reviewUrlData(); }}>
+    {(lessonLaunchRequest || lessonLaunchError) && <LessonLaunchDialog request={lessonLaunchRequest} review={lessonLaunchReview} loading={lessonLaunchLoading} error={lessonLaunchError} busy={lessonLaunchBusy} runtimeCompatible={lessonLaunchRuntimeCompatible} close={closeLessonLaunch} install={runAll => void installSharedLesson(runAll)}/>}
+    {lessonUpdateEntry && lessonUpdateInstalled && <LessonUpdateDialog installed={lessonUpdateInstalled} update={lessonUpdateEntry} busy={installingId === lessonUpdateEntry.id} close={() => setLessonUpdateEntry(null)} confirm={() => void confirmLessonUpdate()}/>}
+    {urlDataOpen && <DialogShell label={urlDataReview ? "Review remote data" : "Add data from URL"} close={closeUrlData}><form className="modal url-data-modal" onSubmit={event => { event.preventDefault(); if (urlDataReview) void downloadUrlData(); else reviewUrlData(); }}>
       <h2>{urlDataReview ? "Review remote data" : "Add data from URL"}</h2>
       {urlDataError && <p className="url-data-error" role="alert">{urlDataError}</p>}
       {!urlDataReview ? <>
         <p>Studio downloads only after review. The URL and observed checksum are saved as workspace provenance. Do not use secret or credential-bearing URLs.</p>
-        <label>HTTPS source URL<input required type="url" value={urlDataDraft.url} onChange={event => setUrlDataDraft(current => {
+        <label>HTTPS source URL<input autoFocus required type="url" value={urlDataDraft.url} onChange={event => setUrlDataDraft(current => {
           const previousSuggested = suggestedRemotePath(current.url); const path = !current.path || current.path === previousSuggested ? suggestedRemotePath(event.target.value) : current.path;
           const mediaType = current.mediaType === inferredMediaType(current.path) ? inferredMediaType(path) : current.mediaType;
           return { ...current, url: event.target.value, path, mediaType };
@@ -1503,6 +2019,6 @@ export default function App() {
         {urlDataDownloading && <p className="download-progress">{kernelKind === "desktop" ? "Streaming directly to the private native data directory…" : <>Downloaded {displayBytes(urlDataProgress)}{urlDataDraft.expectedBytes ? ` of ${displayBytes(Number(urlDataDraft.expectedBytes))}` : ""}…</>}</p>}
       </>}
       <div><button type="button" disabled={urlDataDownloading} onClick={urlDataReview ? () => { setUrlDataReview(false); setUrlDataError(""); } : closeUrlData}>{urlDataReview ? "Change" : "Cancel"}</button>{urlDataReview && <button type="button" disabled={urlDataDownloading} onClick={closeUrlData}>Cancel</button>}<button className="primary" disabled={urlDataDownloading} type="submit">{urlDataReview ? urlDataDownloading ? "Downloading…" : "Download and attach" : "Review"}</button></div>
-    </form></div>}
+    </form></DialogShell>}
   </div>;
 }

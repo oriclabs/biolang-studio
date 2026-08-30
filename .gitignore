@@ -7,3 +7,4 @@ public/runtime/*
 .env.local
 *.log
 tmp/
+rev*.txt

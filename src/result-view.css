@@ -24,6 +24,7 @@
 .result-view-switch button.active { background: #fff; color: #263b36; box-shadow: 0 1px 2px rgb(0 0 0 / 10%); font-weight: 700; }
 .key-value-table th[scope="row"] { width: 38%; color: #53625e; font-weight: 600; }
 .result-preview-note, .table-wrap > p { margin: 7px 0 0; color: #6b7874; font-size: 11px; }
+.table-wrap > p button { border: 0; padding: 2px 4px; background: transparent; color: var(--bl-accent); font-size: inherit; font-weight: 700; }
 
 /* BioLang operators must remain literal: some programming fonts turn |> into a triangle. */
 .code-editor, .result pre, .prose code {
@@ -32,6 +33,7 @@
 }
 
 .cell-rail em { display: block; margin-top: 3px; overflow: hidden; color: #7b8884; font-size: 8px; font-style: normal; line-height: 1.05; text-overflow: ellipsis; }
+.code-editor, .markdown-editor { overflow-y: hidden; }
 .cell.done { border-color: #a9d3bd; }
 .cell.done .cell-rail { background: #edf8f2; color: #167052; }
 .cell.done .cell-rail button { color: #167052; }
@@ -51,7 +53,7 @@
 .plot-view .plot-frame { display: block; width: 100%; height: 100%; min-height: 0; border: 0; overflow: hidden; background: #fff; }
 .plot-export-error { margin: 6px 0 0; color: #a24235; font-size: 11px; }
 .plot-lightbox { position: fixed; z-index: 50; inset: 0; display: grid; place-items: center; padding: 24px; background: rgb(8 18 16 / 78%); }
-.plot-lightbox-panel { width: min(1400px, 96vw); height: min(900px, 92vh); display: grid; grid-template-rows: 42px minmax(0, 1fr); overflow: hidden; border-radius: 12px; background: #fff; box-shadow: 0 24px 80px rgb(0 0 0 / 35%); }
+.plot-lightbox-panel { max-height: 92vh; display: grid; grid-template-rows: 42px minmax(0, 1fr); overflow: hidden; border-radius: 12px; background: #fff; box-shadow: 0 24px 80px rgb(0 0 0 / 35%); }
 .plot-lightbox-head { display: flex; align-items: center; justify-content: space-between; padding: 7px 10px 7px 14px; border-bottom: 1px solid #e1e7e3; color: #40514c; font-size: 12px; font-weight: 700; }
 .plot-lightbox .plot-frame { width: 100%; height: 100%; border: 0; }
 
@@ -59,5 +61,5 @@
   .data-preflight { align-items: stretch; flex-direction: column; }
   .data-preflight button { width: 100%; }
   .plot-lightbox { padding: 8px; }
-  .plot-lightbox-panel { width: 100%; height: 96vh; }
+  .plot-lightbox-panel { width: 100%!important; max-height: 96vh; }
 }

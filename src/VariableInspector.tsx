@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { VariableExport, VariableExportFormat, VariablePage, VariableSummary } from "./kernel/protocol";
 
 const PAGE_SIZE = 20;
@@ -49,14 +49,20 @@ export interface VariableInspectorProps {
 
 export function VariableInspector({ variables, revision, canInspect, exportMode, canRemove = false, inspect, exportExact, publishOutput, remove, notify }: VariableInspectorProps) {
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
+  const expandedRef = useRef(expanded);
   const [pages, setPages] = useState<Record<string, VariablePage>>({});
   const [loading, setLoading] = useState<Set<string>>(() => new Set());
   const [errors, setErrors] = useState<Record<string, string>>({});
 
   useEffect(() => {
-    setExpanded(new Set());
+    const available = new Set(variables.map(variable => variable.name));
+    const retained = [...expandedRef.current].filter(name => available.has(name));
+    const nextExpanded = new Set(retained);
+    expandedRef.current = nextExpanded;
+    setExpanded(nextExpanded);
     setPages({});
     setErrors({});
+    retained.forEach(name => void load(name));
   }, [revision]);
 
   async function load(name: string, offset = 0) {
@@ -78,7 +84,7 @@ export function VariableInspector({ variables, revision, canInspect, exportMode,
 
   async function toggle(name: string) {
     const opening = !expanded.has(name);
-    setExpanded(current => { const next = new Set(current); opening ? next.add(name) : next.delete(name); return next; });
+    setExpanded(current => { const next = new Set(current); opening ? next.add(name) : next.delete(name); expandedRef.current = next; return next; });
     if (opening && !pages[name]) await load(name);
   }
 

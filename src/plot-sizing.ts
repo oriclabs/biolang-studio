@@ -13,3 +13,9 @@ export function svgPlotSize(markup: string): PlotSize {
   const height = viewHeight && viewHeight > 0 ? viewHeight : numericAttribute(markup, "height") ?? 520;
   return { width, height, ratio: width / height };
 }
+
+export function ensureSvgViewBox(markup: string) {
+  if (/\bviewBox\s*=/i.test(markup)) return markup;
+  const size = svgPlotSize(markup);
+  return markup.replace(/<svg\b/i, `<svg viewBox="0 0 ${size.width} ${size.height}" preserveAspectRatio="xMidYMid meet"`);
+}

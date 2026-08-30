@@ -37,8 +37,10 @@
 .lesson-step-cells { padding: 11px 11px 0; }
 .lesson-step-cells .cell:last-child { margin-bottom: 11px; }
 
-.cell-markdown .cell-body { position: relative; }
-.markdown-edit-action {
+.cell-markdown .cell-body,
+.cell-code .cell-body { position: relative; }
+.markdown-edit-action,
+.cell-copy-action {
   position: absolute;
   top: 8px;
   right: 8px;
@@ -51,7 +53,11 @@
   font-size: 10px;
 }
 .markdown-edit-action:hover,
-.markdown-edit-action:focus-visible { border-color: var(--bl-accent); color: var(--bl-accent); }
+.markdown-edit-action:focus-visible,
+.cell-copy-action:hover,
+.cell-copy-action:focus-visible { border-color: var(--bl-accent); color: var(--bl-accent); }
+.cell-copy-action:disabled { cursor: default; opacity: .45; }
+.cell-code .code-editor { padding-right: 48px; }
 .cell-markdown .prose { padding-right: 38px; }
 
 .variables-section { padding-top: 0 !important; }
