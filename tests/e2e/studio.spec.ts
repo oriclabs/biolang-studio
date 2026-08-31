@@ -71,6 +71,21 @@ test("edits the safe JavaScript frontend and reports unsupported JavaScript live
   await expect(cell.locator(".cm-lintRange-error")).toBeVisible({ timeout: 5_000 });
 });
 
+test("opens a newly inserted JavaScript cell as an editable direct cell", async ({ page }) => {
+  await page.goto("/?lang=js");
+  await expect(page.locator(".status")).toHaveText("ready", { timeout: 30_000 });
+  await page.getByRole("button", { name: "+ Code" }).click();
+  const cell = page.locator("article.cell-code").last();
+  const editor = cell.getByLabel(/JavaScript equivalent/);
+  await expect(editor).toContainText("// Direct JavaScript API;");
+  await expect(editor).toContainText("null;");
+  await expect(editor).not.toContainText("bio.program(");
+  await expect(editor).toHaveAttribute("contenteditable", "true");
+  await editor.fill("let value = await bl.mean([2, 4, 6]);\nvalue;");
+  await cell.getByRole("tab", { name: "BioLang" }).click();
+  await expect(cell.getByLabel(/BioLang cell/)).toContainText("let value = mean([2, 4, 6])", { timeout: 5_000 });
+});
+
 test("creates an editable task-first statistics notebook", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Guided stats" }).click();
