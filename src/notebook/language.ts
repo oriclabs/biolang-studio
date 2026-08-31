@@ -23,25 +23,6 @@ export function saveNotebookCodeLanguage(
   catch { /* A language preference is useful, but never required. */ }
 }
 
-/**
- * Produce a complete JavaScript embedding for one existing BioLang cell.
- * Scientific work remains in the canonical BioLang source and is evaluated by
- * the same WASM/native/SOMER kernel; JavaScript only drives the session API.
- */
-export function javascriptEmbedding(source: string) {
-  const escaped = String(source ?? "")
-    .replace(/\\/g, "\\\\")
-    .replace(/`/g, "\\`")
-    .replace(/\$\{/g, "\\${");
-  return [
-    "// `bl` is the persistent BioLang notebook session.",
-    "const result = await bl.run(",
-    `  \`${escaped}\`,`,
-    ");",
-    "result;",
-  ].join("\n");
-}
-
 export type CompiledNotebookCode = {
   language: NotebookCodeLanguage;
   frontendSource: string;
@@ -49,11 +30,11 @@ export type CompiledNotebookCode = {
 };
 
 /** Compile the selected notebook frontend to the one kernel language. */
-export function compileNotebookCode(source: string, language: NotebookCodeLanguage): CompiledNotebookCode {
+export function compileNotebookCode(source: string, language: NotebookCodeLanguage, javascriptSource?: string): CompiledNotebookCode {
   const biolangSource = String(source ?? "");
   return {
     language,
-    frontendSource: language === "javascript" ? javascriptEmbedding(biolangSource) : biolangSource,
+    frontendSource: language === "javascript" ? String(javascriptSource ?? "") : biolangSource,
     biolangSource,
   };
 }

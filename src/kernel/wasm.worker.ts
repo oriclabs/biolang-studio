@@ -4,6 +4,7 @@ type WasmModule = {
   default: (input?: unknown) => Promise<unknown>;
   init: () => void;
   evaluate: (source: string) => string;
+  transpile_javascript: (source: string) => string;
   reset: () => void;
   list_variables: () => string;
   inspect_variable: (name: string, offset: number, limit: number) => string;
@@ -12,6 +13,8 @@ type WasmModule = {
 
 const files = new Map<string, string>();
 let runtime: WasmModule | null = null;
+type JavaScriptSdk = { sourceOf(value: unknown): string; [name: string]: unknown };
+let javascriptSdk: JavaScriptSdk | null = null;
 let runtimeBase = "";
 
 // wasm-bindgen currently imports the file bridge from `window`. A worker has no
@@ -36,6 +39,13 @@ async function loadRuntime() {
   module.init();
   runtime = module;
   return module;
+}
+
+async function loadJavaScriptSdk() {
+  if (javascriptSdk) return javascriptSdk;
+  const sdkUrl = new URL("biolang-dsl.js", runtimeBase).href;
+  javascriptSdk = await import(/* @vite-ignore */ sdkUrl) as JavaScriptSdk;
+  return javascriptSdk;
 }
 
 function attach(file: AttachedFile) {
@@ -65,6 +75,25 @@ async function handle(request: WorkerRequest): Promise<unknown> {
       result.elapsedMs = Math.round((performance.now() - started) * 10) / 10;
       result.backend = "browser";
       return result;
+    }
+    case "executeJavaScript": {
+      const started = performance.now();
+      const generated = JSON.parse(wasm.transpile_javascript(request.biolangSource)) as { ok: boolean; source?: string; error?: string };
+      if (!generated.ok || !generated.source) throw new Error(generated.error || "Cannot translate this cell to JavaScript.");
+      if (generated.source !== request.javascriptSource) throw new Error("The JavaScript frontend changed after it was generated. Switch to BioLang or regenerate the JavaScript cell before running it.");
+      const bio = await loadJavaScriptSdk();
+      const executable = request.javascriptSource.replace(/\nresult;\s*$/, "\nreturn result;");
+      const run = new Function("bio", "bl", `"use strict"; return (async () => { ${executable} })()`);
+      const bl = { run(program: unknown) { return JSON.parse(wasm.evaluate(bio.sourceOf(program as never))) as ExecutionResult; } };
+      const result = await run(bio, bl) as ExecutionResult;
+      result.elapsedMs = Math.round((performance.now() - started) * 10) / 10;
+      result.backend = "browser";
+      return result;
+    }
+    case "transpileJavaScript": {
+      const result = JSON.parse(wasm.transpile_javascript(request.source)) as { ok: boolean; source?: string; error?: string };
+      if (!result.ok || !result.source) throw new Error(result.error || "Cannot translate this cell to JavaScript.");
+      return result.source;
     }
     case "reset":
       wasm.reset();

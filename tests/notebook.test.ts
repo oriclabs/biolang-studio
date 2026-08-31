@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { directives, executableSource, expandMixedMarkdown, parseNotebook, serializeNotebook, type NotebookCell } from "../src/notebook/format";
-import { compileNotebookCode, javascriptEmbedding, readNotebookCodeLanguage, saveNotebookCodeLanguage } from "../src/notebook/language";
+import { compileNotebookCode, readNotebookCodeLanguage, saveNotebookCodeLanguage } from "../src/notebook/language";
 import { lessonEntryForDocument, manifestLessonEntries, validateManifest } from "../src/content/manifest";
 import { lessonUpdateAvailable } from "../src/content/installed";
 import { manifestLessonShareUrl, parseLessonLaunchUrl, registryLessonShareUrl, removeLessonLaunchParams } from "../src/content/lesson-links";
@@ -35,17 +35,13 @@ describe("BioLang notebook format", () => {
 });
 
 describe("paired JavaScript lesson view", () => {
-  it("creates runnable JavaScript which preserves the exact BioLang source", async () => {
-    const source = "let label = `sample`\nlet escaped = \\\"${value}\\\"\nmean([1, 2, 3])";
-    const generated = javascriptEmbedding(source);
-    expect(generated).toContain("await bl.run(");
-    expect(generated).toContain("\\`sample\\`");
-    expect(generated).toContain("\\${value}");
-    expect(generated).toContain("mean([1, 2, 3])");
-    let observed = "";
-    const execute = new Function("bl", `return (async () => { ${generated} })()`);
-    await execute({ run(value: string) { observed = value; return { ok: true }; } });
-    expect(observed).toBe(source);
+  it("keeps structural JavaScript separate from the canonical kernel source", () => {
+    const source = "let measurements = [12, 14, 15]\nsummary(measurements)";
+    const generated = "const result = await bio.program(bio.let_(\"measurements\", [12, 14, 15]), bio.expr_(bio.callExpr(\"summary\", [bio.ref(\"measurements\")]))).run(bl);";
+    const compiled = compileNotebookCode(source, "javascript", generated);
+    expect(compiled.frontendSource).toContain("bio.let_");
+    expect(compiled.frontendSource).not.toContain("`let measurements");
+    expect(compiled.biolangSource).toBe(source);
   });
   it("uses URL language overrides and otherwise remembers the reader preference", () => {
     const values = new Map<string, string>();
@@ -58,9 +54,9 @@ describe("paired JavaScript lesson view", () => {
   it("compiles both frontends to the same canonical kernel source", () => {
     const source = "let values = [1, 2, 3]\nmean(values)";
     const biolang = compileNotebookCode(source, "biolang");
-    const javascript = compileNotebookCode(source, "javascript");
+    const javascript = compileNotebookCode(source, "javascript", "await bio.program().run(bl)");
     expect(biolang.frontendSource).toBe(source);
-    expect(javascript.frontendSource).toContain("await bl.run(");
+    expect(javascript.frontendSource).toContain("bio.program");
     expect(javascript.biolangSource).toBe(biolang.biolangSource);
   });
 });

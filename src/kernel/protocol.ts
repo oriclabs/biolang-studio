@@ -117,6 +117,8 @@ export interface Kernel {
   readonly capabilities: KernelCapabilities;
   initialize(): Promise<KernelCapabilities>;
   execute(source: string): Promise<ExecutionResult>;
+  executeJavaScript?(javascriptSource: string, biolangSource: string): Promise<ExecutionResult>;
+  transpileJavaScript?(source: string): Promise<string>;
   reset(): Promise<void>;
   clearFiles(): Promise<void>;
   attach(file: AttachedFile): Promise<void>;
@@ -135,6 +137,8 @@ export interface Kernel {
 export type WorkerRequest =
   | { id: number; method: "initialize"; runtimeBase: string }
   | { id: number; method: "execute"; source: string }
+  | { id: number; method: "executeJavaScript"; javascriptSource: string; biolangSource: string }
+  | { id: number; method: "transpileJavaScript"; source: string }
   | { id: number; method: "reset" }
   | { id: number; method: "clearFiles" }
   | { id: number; method: "attach"; file: AttachedFile }

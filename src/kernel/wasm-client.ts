@@ -3,6 +3,8 @@ import type { AttachedFile, ExecutionResult, Kernel, KernelCapabilities, Variabl
 type WorkerCall =
   | { method: "initialize"; runtimeBase: string }
   | { method: "execute"; source: string }
+  | { method: "executeJavaScript"; javascriptSource: string; biolangSource: string }
+  | { method: "transpileJavaScript"; source: string }
   | { method: "reset" }
   | { method: "clearFiles" }
   | { method: "attach"; file: AttachedFile }
@@ -56,6 +58,10 @@ export class WasmKernel implements Kernel {
     return capabilities;
   }
   execute(source: string) { return this.call<ExecutionResult>({ method: "execute", source }); }
+  executeJavaScript(javascriptSource: string, biolangSource: string) {
+    return this.call<ExecutionResult>({ method: "executeJavaScript", javascriptSource, biolangSource });
+  }
+  transpileJavaScript(source: string) { return this.call<string>({ method: "transpileJavaScript", source }); }
   reset() { return this.call<void>({ method: "reset" }); }
   async clearFiles() { this.attached.clear(); await this.call<void>({ method: "clearFiles" }); }
   async attach(file: AttachedFile) { this.attached.set(file.path, file); await this.call({ method: "attach", file }); }
