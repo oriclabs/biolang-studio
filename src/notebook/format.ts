@@ -2,6 +2,7 @@ export type NotebookCell = {
   id: string;
   type: "markdown" | "code";
   source: string;
+  javascriptSource?: string;
   status?: "" | "running" | "done" | "error" | "skipped" | "stale";
   step?: { id: string; title: string };
 };
@@ -9,14 +10,14 @@ export type NotebookCell = {
 const EXECUTABLE_LANGUAGES = new Set(["", "bl", "biolang"]);
 const normalize = (value: string) => String(value ?? "").replace(/\r\n?/g, "\n");
 
-function push(cells: NotebookCell[], type: NotebookCell["type"], source: string, step?: NotebookCell["step"]) {
+function push(cells: NotebookCell[], type: NotebookCell["type"], source: string, step?: NotebookCell["step"], javascriptSource?: string) {
   const value = source.replace(/^\n+|\n+$/g, "");
   if (!value && type === "markdown") return;
   if (type === "markdown" && cells.at(-1)?.type === "markdown" && cells.at(-1)?.step?.id === step?.id) {
     cells.at(-1)!.source += `\n\n${value}`;
     return;
   }
-  cells.push({ id: crypto.randomUUID(), type, source: value, status: "", ...(step ? { step } : {}) });
+  cells.push({ id: crypto.randomUUID(), type, source: value, status: "", ...(step ? { step } : {}), ...(javascriptSource ? { javascriptSource } : {}) });
 }
 
 const stepStart = /^\s*<!--\s*bl:step(?:\s+title=(?:"([^"]*)"|'([^']*)'))?\s*-->\s*$/i;
@@ -36,6 +37,7 @@ export function parseNotebook(source: string): NotebookCell[] {
   const cells: NotebookCell[] = [];
   let prose: string[] = [];
   let step: NotebookCell["step"] | undefined;
+  let pendingJavaScript: string | undefined;
   const flush = () => { push(cells, "markdown", prose.join("\n"), step); prose = []; };
   for (let index = 0; index < lines.length;) {
     const opening = lines[index].match(stepStart);
@@ -52,8 +54,10 @@ export function parseNotebook(source: string): NotebookCell[] {
       let end = index + 1;
       const close = new RegExp(`^\\s*${marker[0]}{${marker.length},}\\s*$`);
       while (end < lines.length && !close.test(lines[end])) end += 1;
-      if (end < lines.length && EXECUTABLE_LANGUAGES.has(language)) {
-        flush(); push(cells, "code", lines.slice(index + 1, end).join("\n"), step);
+      if (end < lines.length && language === "javascript+biolang") {
+        flush(); pendingJavaScript = lines.slice(index + 1, end).join("\n").replace(/^\n+|\n+$/g, "");
+      } else if (end < lines.length && EXECUTABLE_LANGUAGES.has(language)) {
+        flush(); push(cells, "code", lines.slice(index + 1, end).join("\n"), step, pendingJavaScript); pendingJavaScript = undefined;
       } else prose.push(...lines.slice(index, Math.min(end + 1, lines.length)));
       index = Math.min(end + 1, lines.length);
       continue;
@@ -76,6 +80,12 @@ export function serializeNotebook(cells: NotebookCell[]) {
     else {
       const longest = Math.max(0, ...Array.from(source.matchAll(/`+/g), match => match[0].length));
       const fence = "`".repeat(Math.max(3, longest + 1));
+      if (cell.javascriptSource) {
+        const javascript = normalize(cell.javascriptSource).replace(/^\n+|\n+$/g, "");
+        const javascriptLongest = Math.max(0, ...Array.from(javascript.matchAll(/`+/g), match => match[0].length));
+        const javascriptFence = "`".repeat(Math.max(3, javascriptLongest + 1));
+        chunks.push(`${javascriptFence}javascript+biolang\n${javascript}\n${javascriptFence}`);
+      }
       chunks.push(`${fence}biolang\n${source}\n${fence}`);
     }
   }

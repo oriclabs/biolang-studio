@@ -1,10 +1,13 @@
 import type { AttachedFile, ExecutionResult, VariableExportFormat, WorkerRequest, WorkerResponse } from "./protocol";
+import { compileSafeJavaScript } from "../notebook/javascript";
 
 type WasmModule = {
   default: (input?: unknown) => Promise<unknown>;
   init: () => void;
   evaluate: (source: string) => string;
   transpile_javascript: (source: string) => string;
+  language_diagnostics: (source: string) => string;
+  language_completions: (prefix: string) => string;
   reset: () => void;
   list_variables: () => string;
   inspect_variable: (name: string, offset: number, limit: number) => string;
@@ -81,20 +84,16 @@ async function handle(request: WorkerRequest): Promise<unknown> {
       const started = performance.now();
       const generated = JSON.parse(wasm.transpile_javascript(request.biolangSource)) as { ok: boolean; source?: string; error?: string };
       if (!generated.ok || !generated.source) throw new Error(generated.error || "Cannot translate this cell to JavaScript.");
-      if (generated.source !== request.javascriptSource) throw new Error("The JavaScript frontend changed after it was generated. Switch to BioLang or regenerate the JavaScript cell before running it.");
       const bio = await loadJavaScriptSdk();
-      const directSource = request.javascriptSource.startsWith("// Direct JavaScript API;");
-      const declared = directSource
-        ? [...request.javascriptSource.matchAll(/^let ([A-Za-z_$][A-Za-z0-9_$]*) =/gm)].map(match => match[1])
-        : [];
-      const resultName = declared.at(-1);
-      const bindingNames = resultName ? declared.slice(0, -1) : [];
-      const priorBindings = [...javascriptVariables.entries()].filter(([name]) => !bindingNames.includes(name));
-      const executable = directSource && resultName
-        ? request.javascriptSource.replace(
-            new RegExp(`\\n${resultName};\\s*$`),
-            `\nreturn { result: ${resultName}, bindings: { ${bindingNames.join(", ")} } };`,
-          )
+      const exactGenerated = generated.source === request.javascriptSource;
+      const directSource = generated.source.startsWith("// Direct JavaScript API;");
+      if (!exactGenerated && !directSource) throw new Error("This generated JavaScript cell is read-only because it needs the structural frontend. Edit its BioLang source instead.");
+      const safe = directSource ? compileSafeJavaScript(request.javascriptSource, javascriptVariables.keys()) : null;
+      if (safe && !safe.ok) throw new Error(safe.issues.map(item => item.message).join("\n"));
+      const bindingNames = safe?.ok ? safe.bindingNames : [];
+      const priorBindings = [...javascriptVariables.entries()].filter(([name]) => !(safe?.ok ? safe.declared : bindingNames).includes(name));
+      const executable = directSource && safe?.ok
+        ? safe.executable
         : request.javascriptSource.replace(/\nresult;\s*$/, "\nreturn result;");
       const run = new Function(
         "bio", "bl", ...priorBindings.map(([name]) => name),
@@ -144,7 +143,10 @@ async function handle(request: WorkerRequest): Promise<unknown> {
         const matchingBinding = bindingNames.find(name => directValue.bindings[name] === directValue.result);
         if (matchingBinding) finalExpression = (bio.ref as (name: string) => unknown)(matchingBinding);
         statements.push((bio.expr_ as (value: unknown) => unknown)(finalExpression));
-        result = direct.run((bio.program as (...items: unknown[]) => unknown)(...statements));
+        const compiledProgram = (bio.program as (...items: unknown[]) => unknown)(...statements);
+        const compiledSource = bio.sourceOf(compiledProgram);
+        result = direct.run(compiledProgram);
+        result.compiledSource = compiledSource;
         if (result.ok) {
           for (const name of bindingNames) javascriptVariables.set(name, direct.ref(name));
         }
@@ -158,6 +160,10 @@ async function handle(request: WorkerRequest): Promise<unknown> {
       if (!result.ok || !result.source) throw new Error(result.error || "Cannot translate this cell to JavaScript.");
       return result.source;
     }
+    case "diagnostics":
+      return JSON.parse(wasm.language_diagnostics(request.source));
+    case "completions":
+      return JSON.parse(wasm.language_completions(request.prefix));
     case "reset":
       wasm.reset();
       javascriptVariables.clear();

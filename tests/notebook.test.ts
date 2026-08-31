@@ -14,6 +14,14 @@ describe("BioLang notebook format", () => {
     expect(cells.map(cell => cell.type)).toEqual(["markdown", "code", "markdown"]);
     expect(parseNotebook(serializeNotebook(cells)).map(cell => [cell.type, cell.source])).toEqual(cells.map(cell => [cell.type, cell.source]));
   });
+  it("round trips a readable JavaScript alternative without making it executable BioLang", () => {
+    const source = "```javascript+biolang\nconst result = await bl.mean([1, 2, 3]);\nresult;\n```\n\n```biolang\nmean([1, 2, 3])\n```\n";
+    const cells = parseNotebook(source);
+    expect(cells).toHaveLength(1);
+    expect(cells[0].source).toBe("mean([1, 2, 3])");
+    expect(cells[0].javascriptSource).toContain("await bl.mean");
+    expect(serializeNotebook(cells)).toBe(source);
+  });
   it("keeps directives out of executable source", () => {
     expect(directives("# @skip\n1 + 1").skip).toBe(true);
     expect(executableSource("# @hide-output\n1 + 1")).toBe("1 + 1");

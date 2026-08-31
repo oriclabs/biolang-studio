@@ -15,7 +15,7 @@ test("renders a print-ready A4 report with code, results, and a plot", async ({ 
   await expect(page.locator(".status")).toHaveText("ready", { timeout: 30_000 });
   await page.getByRole("button", { name: "+ Code" }).click();
   const plotCell = page.locator("article.cell-code").last();
-  await plotCell.locator("textarea.code-editor").fill('histogram([12, 14, 15, 15, 16, 19, 28], {bins: 5, format: "svg", title: "Teaching distribution"})');
+  await plotCell.locator(".cm-content").fill('histogram([12, 14, 15, 15, 16, 19, 28], {bins: 5, format: "svg", title: "Teaching distribution"})');
   await plotCell.getByRole("button", { name: /Run cell/ }).click();
   await expect(plotCell.locator('iframe[title="BioLang plot"]')).toBeVisible({ timeout: 30_000 });
 

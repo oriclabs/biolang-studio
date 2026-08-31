@@ -39,9 +39,23 @@ test("shows every existing lesson cell as paired BioLang and JavaScript", async 
 
   await firstCell.getByRole("tab", { name: "BioLang" }).click();
   await expect(page.getByLabel("Notebook code language")).toHaveValue("biolang");
-  await expect(page.locator("textarea.code-editor").first()).toContainText("let measurements");
+  await expect(page.locator(".codemirror-editor .cm-content").first()).toContainText("let measurements");
   await page.goto("/");
   await expect(page.locator("article.cell-code").first().getByRole("tab", { name: "BioLang" })).toHaveAttribute("aria-selected", "true");
+});
+
+test("edits the safe JavaScript frontend and reports unsupported JavaScript live", async ({ page }) => {
+  await page.goto("/?lang=js");
+  await expect(page.locator(".status")).toHaveText("ready", { timeout: 30_000 });
+  const cell = page.locator("article.cell-code").first();
+  const editor = cell.getByLabel("JavaScript equivalent for cell 2");
+  await expect(editor).toContainText("await bl.summary(measurements)");
+  await editor.fill(`// Direct JavaScript API; BioLang remains the execution engine.\nlet measurements = [1, 2, 3, 4];\nlet report = await bl.summary(measurements);\nreport.mean;`);
+  await cell.getByRole("button", { name: /Run cell/ }).click();
+  await expect(cell.locator(".result")).toContainText("2.5", { timeout: 30_000 });
+
+  await editor.fill('fetch("https://example.com")');
+  await expect(cell.locator(".cm-lintRange-error")).toBeVisible({ timeout: 5_000 });
 });
 
 test("creates an editable task-first statistics notebook", async ({ page }) => {
@@ -53,8 +67,8 @@ test("creates an editable task-first statistics notebook", async ({ page }) => {
   await page.getByLabel("Columns, in the stated order").fill("baseline,followup");
   await page.getByRole("button", { name: "Create notebook" }).click();
   await expect(page.getByLabel("Notebook name")).toHaveValue("compare-matched-measurements.bln");
-  await expect(page.locator("textarea.code-editor").first()).toContainText('read_csv("patient-measurements.csv")');
-  await expect(page.locator("textarea.code-editor").nth(1)).toContainText('stat.paired_change(data["baseline"], data["followup"], {method: "paired_t"})');
+  await expect(page.locator(".codemirror-editor .cm-content").first()).toContainText('read_csv("patient-measurements.csv")');
+  await expect(page.locator(".codemirror-editor .cm-content").nth(1)).toContainText('stat.paired_change(data["baseline"], data["followup"], {method: "paired_t"})');
 });
 
 test("runs prerequisite cells in the isolated WASM kernel", async ({ page }) => {
@@ -71,8 +85,8 @@ test("runs prerequisite cells in the isolated WASM kernel", async ({ page }) => 
   await expect(page.getByText(/Earlier code cells were run when needed/)).toBeVisible();
   await expect(page.getByText(/2 runnable · all current/)).toBeVisible();
   await expect(page.getByRole("button", { name: "Run again cell 4" })).toBeVisible();
-  const firstCode = page.locator("article.cell-code").first().locator("textarea.code-editor");
-  await firstCode.fill(`${await firstCode.inputValue()} `);
+  const firstCode = page.locator("article.cell-code").first().locator(".cm-content");
+  await firstCode.fill(`${await firstCode.textContent()} `);
   await expect(page.getByRole("button", { name: "Rerun required cell 2" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Rerun required cell 4" })).toBeVisible();
   await expect(page.getByText(/2 runnable · 0 current/)).toBeVisible();
@@ -82,16 +96,17 @@ test("supports notebook keyboard execution, copying, indentation, and accessible
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   await page.goto("/");
   await expect(page.locator(".status")).toHaveText("ready", { timeout: 30_000 });
-  const first = page.locator("textarea.code-editor").first();
+  const first = page.locator(".codemirror-editor .cm-content").first();
   await first.fill("let shortcut_value = 41\nshortcut_value + 1");
   await first.press("Control+Enter");
   await expect(page.locator("article.cell-code").first().locator(".result")).toContainText("42", { timeout: 30_000 });
-  await page.locator("article.cell-code").first().getByRole("button", { name: /Copy code from cell/ }).click();
+  await page.locator("article.cell-code").first().getByRole("button", { name: /Copy BioLang code from cell/ }).click();
   expect((await page.evaluate(() => navigator.clipboard.readText())).replace(/\r\n?/g, "\n")).toBe("let shortcut_value = 41\nshortcut_value + 1");
   await expect(page.getByText(/Copied BioLang code from cell/)).toBeVisible();
   await first.press("End");
   await first.press("Tab");
-  await expect(first).toHaveValue(/  $/);
+  await page.locator("article.cell-code").first().getByRole("button", { name: /Copy BioLang code from cell/ }).click();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toMatch(/ {2}/);
 
   await page.getByRole("button", { name: "Guided stats" }).click();
   await expect(page.getByRole("dialog", { name: "New guided statistics notebook" })).toBeVisible();
@@ -171,7 +186,7 @@ test("renders plots responsively with resize and export actions", async ({ page 
   await expect(page.locator(".status")).toHaveText("ready", { timeout: 30_000 });
   await page.getByRole("button", { name: "+ Code" }).click();
   const cell = page.locator("article.cell-code").last();
-  await cell.locator("textarea.code-editor").fill('histogram([18, 19, 20, 21, 22, 24, 27, 31], {bins: 4, format: "svg", title: "Responsive BMI"})');
+  await cell.locator(".cm-content").fill('histogram([18, 19, 20, 21, 22, 24, 27, 31], {bins: 4, format: "svg", title: "Responsive BMI"})');
   await cell.getByRole("button", { name: /Run cell/ }).click();
   const plot = cell.locator(".plot-view");
   await expect(plot.locator('iframe[title="BioLang plot"]')).toBeVisible({ timeout: 30_000 });
@@ -199,8 +214,8 @@ test("stops at an inline error and offers retry or delete", async ({ page }) => 
   await page.getByRole("button", { name: "+ Code" }).click();
   await page.getByRole("button", { name: "+ Code" }).click();
   const code = page.locator("article.cell-code");
-  await code.nth(0).locator("textarea.code-editor").fill("does_not_exist()");
-  await code.nth(1).locator("textarea.code-editor").fill("let should_not_run = 42");
+  await code.nth(0).locator(".cm-content").fill("does_not_exist()");
+  await code.nth(1).locator(".cm-content").fill("let should_not_run = 42");
   await code.nth(1).getByRole("button", { name: /Run cell/ }).click();
   await expect(code.nth(0).locator(".result-error")).toHaveAttribute("role", "alert");
   await expect(code.nth(0).getByRole("button", { name: "Retry cell 2" })).toBeVisible();
@@ -253,7 +268,7 @@ test("uses native document open, atomic save metadata, recents, and external rel
   await expect(page.locator(".status")).toHaveText("ready", { timeout: 30_000 });
   await page.getByRole("button", { name: "Open", exact: true }).click();
   await expect(page.getByLabel("Notebook name")).toHaveValue("native-analysis.bln");
-  await page.locator("textarea.code-editor").fill("let native_value = 2");
+  await page.locator(".codemirror-editor .cm-content").fill("let native_value = 2");
   await page.getByRole("button", { name: "Save", exact: true }).click();
   await expect(page.getByText("Saved native-analysis.bln atomically.")).toBeVisible();
   const saveRequest = await page.evaluate(() => (window as any).__nativeCalls.find((call: any) => call.command === "studio_save_document").payload.request);
@@ -267,7 +282,7 @@ test("uses native document open, atomic save metadata, recents, and external rel
   await page.evaluate(() => { (window as any).__externalChanged = true; (window as any).__diskSource = "# Reloaded\n\n```biolang\nlet native_value = 3\n```\n"; window.dispatchEvent(new Event("focus")); });
   await expect(page.getByText("Changed outside Studio", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Reload notebook" }).click();
-  await expect(page.locator("textarea.code-editor")).toHaveValue("let native_value = 3");
+  await expect(page.locator(".codemirror-editor .cm-content")).toHaveText("let native_value = 3");
 });
 
 test("cancels native execution and namespaces kernel disposal across notebook tabs", async ({ page }) => {
@@ -311,7 +326,7 @@ test("inspects variables in bounded pages and exports a small value", async ({ p
   const values = Array.from({ length: 25 }, (_, index) => index + 1).join(", ");
   const longValue = "A".repeat(300);
   const cell = page.locator("article.cell-code").first();
-  await cell.locator("textarea.code-editor").fill(`let many = [${values}]\nlet exact = ["${longValue}"]`);
+  await cell.locator(".cm-content").fill(`let many = [${values}]\nlet exact = ["${longValue}"]`);
   await cell.getByRole("button", { name: /Run cell/ }).click();
 
   await page.locator("details.variables-disclosure > summary").click();
@@ -373,13 +388,13 @@ test("keeps notebook variables isolated while sharing an explicit data attachmen
   await expect(page.locator(".status")).toHaveText("ready", { timeout: 30_000 });
 
   await page.getByRole("button", { name: "+ Code" }).click();
-  await page.locator("textarea.code-editor").last().fill("measurements");
+  await page.locator(".codemirror-editor .cm-content").last().fill("measurements");
   await page.locator("article.cell-code").last().getByRole("button", { name: /Run cell/ }).click();
   await expect(page.locator("article.cell-code").last().locator(".result-error")).toContainText(/measurements|variable/i);
 
   await page.waitForTimeout(1_000);
   await page.reload();
-  await expect(page.getByRole("tab")).toHaveCount(2);
+  await expect(page.getByRole("tablist", { name: "Open notebooks" }).getByRole("tab")).toHaveCount(2);
   await expect(page.locator(".attached-data").filter({ hasText: "shared.csv" })).toContainText("all notebooks");
 });
 
@@ -429,13 +444,13 @@ test("exports, imports, closes, and reopens a multi-notebook workspace", async (
   await page.getByRole("button", { name: "Save", exact: true }).click();
   await saveEvent;
   await page.getByRole("button", { name: "Close second.bln" }).click();
-  await expect(page.getByRole("tab")).toHaveCount(1);
+  await expect(page.getByRole("tablist", { name: "Open notebooks" }).getByRole("tab")).toHaveCount(1);
   await page.getByRole("button", { name: "Reopen closed" }).click();
-  await expect(page.getByRole("tab")).toHaveCount(2);
+  await expect(page.getByRole("tablist", { name: "Open notebooks" }).getByRole("tab")).toHaveCount(2);
 
   await page.locator('input[accept*=".blw"]').setInputFiles({ name: "study.blw", mimeType: "application/json", buffer: workspaceBytes });
   await expect(page.getByLabel("Workspace name")).toHaveValue("Two notebook study");
-  await expect(page.getByRole("tab")).toHaveCount(2);
+  await expect(page.getByRole("tablist", { name: "Open notebooks" }).getByRole("tab")).toHaveCount(2);
 });
 
 test("reviews an independent HTTPS file before downloading and records provenance", async ({ page }) => {
@@ -492,7 +507,7 @@ test("recovers a valid backup when the primary session is interrupted", async ({
   });
   await page.reload();
   await expect(page.getByText(/Recovered 2 notebooks from the backup session copy/)).toBeVisible();
-  await expect(page.getByRole("tab")).toHaveCount(2);
+  await expect(page.getByRole("tablist", { name: "Open notebooks" }).getByRole("tab")).toHaveCount(2);
 });
 
 test("clears cached data without deleting notebook references", async ({ page }) => {
@@ -642,7 +657,7 @@ test("discovers, verifies, runs, and removes a registry lesson", async ({ page }
   await expect(page.getByText(/checksum-verified and installed/)).toBeVisible();
   await expect(page.locator('input[aria-label="Notebook name"]')).toHaveValue("registry-demo.bln");
   await expect(page.locator("aside.sidebar details.lesson-series summary").getByText("Test methods book")).toBeVisible();
-  await page.locator("article.cell-code textarea").fill('# local note\nlet tiny = read_csv("tiny.csv")\nnrow(tiny)');
+  await page.locator("article.cell-code .cm-content").fill('# local note\nlet tiny = read_csv("tiny.csv")\nnrow(tiny)');
   await page.getByRole("button", { name: "Registry", exact: true }).click();
   await expect(registryDetail.getByText("Installed", { exact: true })).toBeVisible();
   await expect(registryDetail.getByText("Open", { exact: true })).toBeVisible();

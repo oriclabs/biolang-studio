@@ -104,6 +104,25 @@ export interface ExecutionResult {
   trace?: Array<{ line: number; text: string }>;
   elapsedMs?: number;
   backend?: KernelKind;
+  compiledSource?: string;
+}
+
+export interface LanguageDiagnostic {
+  severity: "error" | "warning" | "information";
+  message: string;
+  start: number;
+  end: number;
+  line: number;
+  column: number;
+  endLine: number;
+  endColumn: number;
+}
+
+export interface LanguageCompletion {
+  label: string;
+  kind: "function" | "keyword";
+  detail: string;
+  insertText: string;
 }
 
 export interface AttachedFile {
@@ -119,6 +138,8 @@ export interface Kernel {
   execute(source: string): Promise<ExecutionResult>;
   executeJavaScript?(javascriptSource: string, biolangSource: string): Promise<ExecutionResult>;
   transpileJavaScript?(source: string): Promise<string>;
+  diagnostics?(source: string): Promise<LanguageDiagnostic[]>;
+  completions?(prefix?: string): Promise<LanguageCompletion[]>;
   reset(): Promise<void>;
   clearFiles(): Promise<void>;
   attach(file: AttachedFile): Promise<void>;
@@ -139,6 +160,8 @@ export type WorkerRequest =
   | { id: number; method: "execute"; source: string }
   | { id: number; method: "executeJavaScript"; javascriptSource: string; biolangSource: string }
   | { id: number; method: "transpileJavaScript"; source: string }
+  | { id: number; method: "diagnostics"; source: string }
+  | { id: number; method: "completions"; prefix: string }
   | { id: number; method: "reset" }
   | { id: number; method: "clearFiles" }
   | { id: number; method: "attach"; file: AttachedFile }

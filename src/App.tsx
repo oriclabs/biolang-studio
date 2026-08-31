@@ -27,9 +27,10 @@ import { LessonUpdateDialog } from "./LessonUpdateDialog";
 import { reportIssues, type NotebookReport, type ReportFormat, type ReportOptions } from "./export/model";
 import { markdownComponents } from "./markdown-components";
 import { applyStudioTheme, readStudioTheme, saveStudioTheme, type StudioTheme } from "./theme";
+import { CodeEditor } from "./CodeEditor";
 
 type Cell = NotebookCell & { result?: ExecutionResult; editing?: boolean };
-type JavaScriptTranslation = { biolangSource: string; javascriptSource?: string; error?: string };
+type JavaScriptTranslation = { biolangSource: string; javascriptSource?: string; error?: string; edited?: boolean };
 type Notice = { tone: "info" | "good" | "bad"; text: string; id?: string } | null;
 const MARKDOWN_COMPONENTS = markdownComponents();
 const INITIAL_NOTICE: NonNullable<Notice> = { id: "welcome", tone: "info", text: "Run any code cell; required earlier cells run automatically." };
@@ -505,12 +506,14 @@ export default function App() {
   }, [kernelKind, remoteUrl, remoteToken, activeDocumentId, kernelEpoch]);
 
   useEffect(() => {
-    if (kernelState !== "ready" || !kernelRef.current?.transpileJavaScript) return;
+    if (kernelState !== "ready") return;
     let alive = true;
     const pending = cells.filter(cell => cell.type === "code").filter(cell => javascriptTranslations[cell.id]?.biolangSource !== executableSource(cell.source));
     if (!pending.length) return;
     void Promise.all(pending.map(async cell => {
       const biolangSource = executableSource(cell.source);
+      if (cell.javascriptSource) return [cell.id, { biolangSource, javascriptSource: cell.javascriptSource, edited: true }] as const;
+      if (!kernelRef.current?.transpileJavaScript) return [cell.id, { biolangSource, error: "Switch to the Browser kernel to generate this JavaScript view." }] as const;
       try { return [cell.id, { biolangSource, javascriptSource: await kernelRef.current!.transpileJavaScript!(biolangSource) }] as const; }
       catch (error) { return [cell.id, { biolangSource, error: error instanceof Error ? error.message : String(error) }] as const; }
     })).then(entries => alive && setJavascriptTranslations(current => ({ ...current, ...Object.fromEntries(entries) })));
@@ -896,6 +899,10 @@ export default function App() {
       setNotice({ tone: "info", text: "BioLang is still starting. Run will be available when the kernel status changes to ready." });
       return;
     }
+    if (codeLanguage === "javascript" && cells.slice(0, end + 1).some(cell => cell.type === "code" && cell.javascriptSource) && !kernelRef.current.executeJavaScript) {
+      setNotice({ tone: "info", text: "Edited JavaScript cells run in the Browser kernel. Desktop and SOMER can run the canonical BioLang tab; the JavaScript SDK can also submit generated BioLang programs directly to SOMER." });
+      return;
+    }
     if (pendingLessonData.length) {
       const names = pendingLessonData.map(dataset => dataset.path).join(", ");
       setNotice({ tone: "info", text: `Prepare the lesson data before running. BioLang cannot open ${names} until ${pendingLessonData.length === 1 ? "it is" : "they are"} downloaded, checksum-verified, and attached.` });
@@ -939,6 +946,7 @@ export default function App() {
     let runSucceeded = false;
     let runError: string | undefined;
     let executingIndex = -1;
+    const actualExecutedSources: string[] = [];
     let start = Math.max(0, validThrough + 1);
     try {
       if (restart || needsResetRef.current || end <= validThrough || kernelKind === "somer") {
@@ -965,6 +973,7 @@ export default function App() {
         const result = runLanguage === "javascript" && compiled?.frontendSource && kernelRef.current.executeJavaScript
           ? await kernelRef.current.executeJavaScript(compiled.frontendSource, source)
           : await kernelRef.current.execute(source);
+        actualExecutedSources.push(result.compiledSource ?? source);
         updateCell(index, { status: result.ok ? "done" : "error", result });
         if (!result.ok) {
           runError = result.error ?? "Execution failed."; setValidThrough(index - 1);
@@ -1001,7 +1010,7 @@ export default function App() {
         success: runSucceeded, workspace: { name: workspaceName.trim() || "BioLang workspace" },
         notebook: {
           id: runNotebookId, filename: runFilename, sourceLanguage: runLanguage, sourceSha256: await sha256(runSource),
-          frontendSourceSha256: await sha256(frontendSource), executedSourceSha256: await sha256(executedSource), executedThrough: end,
+          frontendSourceSha256: await sha256(frontendSource), executedSourceSha256: await sha256(actualExecutedSources.length ? actualExecutedSources.join("\n\n") : executedSource), executedThrough: end,
           codeCells: cells.slice(0, end + 1).filter(cell => cell.type === "code" && !directives(cell.source).skip).length,
         },
         runtime, inputs: runInputs, timing: { elapsedMs: Math.round(performance.now() - runStarted) },
@@ -1864,7 +1873,7 @@ export default function App() {
       { id: crypto.randomUUID(), type: "code", source: "# BioLang code", editing: true, status: "" },
       ...current.slice(insertion).map(cell => cell.type === "code" && cell.result ? { ...cell, status: "stale" as const } : cell),
     ]);
-    requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>(`[data-cell-index="${insertion}"] textarea`)?.focus());
+    requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-cell-index="${insertion}"] .cm-content`)?.focus());
   }
 
   function moveCell(index: number, delta: -1 | 1) {
@@ -1946,14 +1955,35 @@ export default function App() {
     const displayedSource = cell.type === "code" && codeLanguage === "javascript"
       ? javascriptTranslations[cell.id]?.javascriptSource ?? (javascriptTranslations[cell.id]?.error ? `// Cannot translate this cell yet:\n// ${javascriptTranslations[cell.id].error}` : "// Generating structural JavaScript…")
       : cell.source;
+    const javascriptEditable = codeLanguage === "javascript" && Boolean(kernelRef.current?.executeJavaScript) && displayedSource.startsWith("// Direct JavaScript API;");
+    const javascriptKnownNames = cells.slice(0, index).flatMap(item => {
+      const source = javascriptTranslations[item.id]?.javascriptSource ?? "";
+      return [...source.matchAll(/^\s*(?:let|const)\s+([A-Za-z_$][\w$]*)\s*=/gm)].map(match => match[1]);
+    });
     return <article className={`cell cell-${cell.type} ${cell.status ?? ""}`} data-cell-index={index} key={cell.id}>
       <div className="cell-rail">{cell.type === "code" ? <><button aria-label={`${runAction.label} cell ${index + 1}`} title={cell.status === "done" ? "Run again from a clean interpreter; earlier cells will replay" : `${runAction.label}; required earlier cells run automatically`} disabled={running || kernelState !== "ready"} onClick={() => void runTo(index)}>{runAction.glyph}</button><small>{index + 1}</small><em>{runAction.state}</em></> : <><span>¶</span><small>{index + 1}</small></>}</div>
       <div className="cell-body">
-        {cell.type === "code" && <><div className="code-language-tabs" role="tablist" aria-label={`Cell ${index + 1} language`}><button role="tab" aria-selected={codeLanguage === "biolang"} className={codeLanguage === "biolang" ? "active" : ""} onClick={() => setCodeLanguage("biolang")}>BioLang</button><button role="tab" aria-selected={codeLanguage === "javascript"} className={codeLanguage === "javascript" ? "active" : ""} onClick={() => setCodeLanguage("javascript")}>JavaScript</button><span>{codeLanguage === "javascript" ? "Generated from the parsed AST · same BioLang kernel" : "Canonical lesson source"}</span></div><button className="cell-copy-action" aria-label={`Copy ${codeLanguage === "javascript" ? "JavaScript" : "BioLang"} code from cell ${index + 1}`} title={`Copy this ${codeLanguage === "javascript" ? "JavaScript SDK code" : "BioLang code"}`} disabled={!displayedSource} onClick={() => void copyCodeCell(cell, index, codeLanguage)}>Copy</button></>}
-        {cell.type === "code" && codeLanguage === "javascript" ? <pre className="javascript-code-preview" aria-label={`JavaScript equivalent for cell ${index + 1}`}><code>{displayedSource}</code></pre> : cell.type === "markdown" && !cell.editing ? <><button className="markdown-edit-action" onClick={() => editMarkdown(index)}>Edit</button><MarkdownView source={cell.source} index={index} edit={editMarkdown}/></> : <AutoGrowTextarea label={`${cell.type} cell ${index + 1}`} className={cell.type === "code" ? "code-editor" : "markdown-editor"} value={cell.source} spellCheck={cell.type === "markdown"} change={source => updateCell(index, { source })} blur={() => cell.type === "markdown" && finishMarkdownCell(index)} run={cell.type === "code" ? advance => {
-          void runTo(index);
-          if (advance) requestAnimationFrame(() => [...document.querySelectorAll<HTMLTextAreaElement>("article.cell-code textarea")].find(editor => Number(editor.closest("article")?.dataset.cellIndex) > index)?.focus());
-        } : undefined}/>}
+        {cell.type === "code" && <><div className="code-language-tabs" role="tablist" aria-label={`Cell ${index + 1} language`}><button role="tab" aria-selected={codeLanguage === "biolang"} className={codeLanguage === "biolang" ? "active" : ""} onClick={() => setCodeLanguage("biolang")}>BioLang</button><button role="tab" aria-selected={codeLanguage === "javascript"} className={codeLanguage === "javascript" ? "active" : ""} onClick={() => setCodeLanguage("javascript")}>JavaScript</button><span>{codeLanguage === "javascript" ? (javascriptEditable ? "Safe JavaScript API · editable · Browser BioLang kernel" : kernelKind === "browser" ? "Structural JavaScript view · edit BioLang source" : "JavaScript view · use Browser kernel to edit") : "Canonical lesson source · live checks"}</span></div><button className="cell-copy-action" aria-label={`Copy ${codeLanguage === "javascript" ? "JavaScript" : "BioLang"} code from cell ${index + 1}`} title={`Copy this ${codeLanguage === "javascript" ? "JavaScript SDK code" : "BioLang code"}`} disabled={!displayedSource} onClick={() => void copyCodeCell(cell, index, codeLanguage)}>Copy</button></>}
+        {cell.type === "code" ? <CodeEditor
+          label={codeLanguage === "javascript" ? `JavaScript equivalent for cell ${index + 1}` : `BioLang cell ${index + 1}`}
+          language={codeLanguage}
+          value={displayedSource}
+          readOnly={codeLanguage === "javascript" && !javascriptEditable}
+          knownNames={javascriptKnownNames}
+          diagnostics={source => kernelRef.current?.diagnostics?.(source) ?? Promise.resolve([])}
+          completions={prefix => kernelRef.current?.completions?.(prefix) ?? Promise.resolve([])}
+          onChange={source => {
+            if (codeLanguage === "biolang") updateCell(index, { source, javascriptSource: undefined });
+            else {
+              updateCell(index, { javascriptSource: source });
+              setJavascriptTranslations(current => ({ ...current, [cell.id]: { biolangSource: executableSource(cell.source), javascriptSource: source, edited: true } }));
+            }
+          }}
+          onRun={advance => {
+            void runTo(index);
+            if (advance) requestAnimationFrame(() => [...document.querySelectorAll<HTMLElement>("article.cell-code .cm-content")].find(editor => Number(editor.closest("article")?.dataset.cellIndex) > index)?.focus());
+          }}
+        /> : cell.type === "markdown" && !cell.editing ? <><button className="markdown-edit-action" onClick={() => editMarkdown(index)}>Edit</button><MarkdownView source={cell.source} index={index} edit={editMarkdown}/></> : <AutoGrowTextarea label={`${cell.type} cell ${index + 1}`} className="markdown-editor" value={cell.source} spellCheck change={source => updateCell(index, { source })} blur={() => finishMarkdownCell(index)}/>}
         {cell.type === "code" && <ResultView result={cell.result} />}
       </div>
       <div className="cell-actions"><button aria-label={`Move cell ${index + 1} up`} title="Move cell up" disabled={index === 0} onClick={() => moveCell(index, -1)}>↑</button><button aria-label={`Move cell ${index + 1} down`} title="Move cell down" disabled={index === cells.length - 1} onClick={() => moveCell(index, 1)}>↓</button><button aria-label={`Insert code after cell ${index + 1}`} title="Insert code cell below" onClick={() => insertCodeAfter(index)}>＋</button><button aria-label={`Delete cell ${index + 1}`} title="Delete cell" onClick={() => deleteCell(index)}>×</button></div>
