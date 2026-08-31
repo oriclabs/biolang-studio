@@ -125,5 +125,9 @@ export function CodeEditor(props: Props) {
     });
   }, [props.language, props.readOnly]);
 
+  useEffect(() => {
+    view.current?.contentDOM.setAttribute("aria-label", props.label);
+  }, [props.label]);
+
   return <div ref={host} className="code-editor codemirror-editor" data-language={props.language} data-readonly={props.readOnly ? "true" : "false"} />;
 }

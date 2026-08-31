@@ -45,14 +45,27 @@ test("shows every existing lesson cell as paired BioLang and JavaScript", async 
 });
 
 test("edits the safe JavaScript frontend and reports unsupported JavaScript live", async ({ page }) => {
+  test.setTimeout(60_000);
   await page.goto("/?lang=js");
   await expect(page.locator(".status")).toHaveText("ready", { timeout: 30_000 });
   const cell = page.locator("article.cell-code").first();
   const editor = cell.getByLabel("JavaScript equivalent for cell 2");
   await expect(editor).toContainText("await bl.summary(measurements)");
-  await editor.fill(`// Direct JavaScript API; BioLang remains the execution engine.\nlet measurements = [1, 2, 3, 4];\nlet report = await bl.summary(measurements);\nreport.mean;`);
-  await cell.getByRole("button", { name: /Run cell/ }).click();
+  await editor.fill(`// Direct JavaScript API; BioLang remains the execution engine.\nlet measurements = [1, 2, 3, 4];\nlet mean = await bl.mean(measurements);\nlet median = await bl.median(measurements);\nlet result = { mean: mean, median: median };\nresult;`);
+  await cell.getByRole("tab", { name: "BioLang" }).click();
+  const biolangEditor = cell.getByLabel("BioLang cell 2");
+  await expect(biolangEditor).toContainText("let mean = mean(measurements)", { timeout: 5_000 });
+  await expect(biolangEditor).toContainText("let result = {mean: mean, median: median}");
+  await cell.getByRole("tab", { name: "JavaScript" }).click();
+  await cell.getByRole("button", { name: /Run|Rerun/ }).click();
   await expect(cell.locator(".result")).toContainText("2.5", { timeout: 30_000 });
+
+  await cell.getByRole("tab", { name: "BioLang" }).click();
+  await biolangEditor.fill("let measurements = [10, 20]\nmean(measurements)");
+  await cell.getByRole("tab", { name: "JavaScript" }).click();
+  await expect(editor).toContainText("await bl.mean(measurements)", { timeout: 5_000 });
+  await cell.getByRole("button", { name: /Run|Rerun/ }).click();
+  await expect(cell.locator(".result")).toContainText("15", { timeout: 30_000 });
 
   await editor.fill('fetch("https://example.com")');
   await expect(cell.locator(".cm-lintRange-error")).toBeVisible({ timeout: 5_000 });

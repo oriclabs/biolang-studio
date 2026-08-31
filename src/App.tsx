@@ -30,7 +30,7 @@ import { applyStudioTheme, readStudioTheme, saveStudioTheme, type StudioTheme } 
 import { CodeEditor } from "./CodeEditor";
 
 type Cell = NotebookCell & { result?: ExecutionResult; editing?: boolean };
-type JavaScriptTranslation = { biolangSource: string; javascriptSource?: string; error?: string; edited?: boolean };
+type JavaScriptTranslation = { biolangSource: string; javascriptSource?: string; error?: string; edited?: boolean; direct?: boolean; syncing?: boolean; syncError?: string };
 type Notice = { tone: "info" | "good" | "bad"; text: string; id?: string } | null;
 const MARKDOWN_COMPONENTS = markdownComponents();
 const INITIAL_NOTICE: NonNullable<Notice> = { id: "welcome", tone: "info", text: "Run any code cell; required earlier cells run automatically." };
@@ -325,6 +325,8 @@ export default function App() {
   const [colorTheme, setColorTheme] = useState<StudioTheme>(readStudioTheme);
   const [codeLanguage, setCodeLanguage] = useState<NotebookCodeLanguage>(readNotebookCodeLanguage);
   const [javascriptTranslations, setJavascriptTranslations] = useState<Record<string, JavaScriptTranslation>>({});
+  const javascriptSyncTimers = useRef<Map<string, number>>(new Map());
+  const javascriptSyncRevisions = useRef<Map<string, number>>(new Map());
   const [kernelEpoch, setKernelEpoch] = useState(0);
   const [running, setRunning] = useState(false);
   const [notice, setNoticeState] = useState<Notice>(INITIAL_NOTICE);
@@ -512,9 +514,12 @@ export default function App() {
     if (!pending.length) return;
     void Promise.all(pending.map(async cell => {
       const biolangSource = executableSource(cell.source);
-      if (cell.javascriptSource) return [cell.id, { biolangSource, javascriptSource: cell.javascriptSource, edited: true }] as const;
+      if (cell.javascriptSource) return [cell.id, { biolangSource, javascriptSource: cell.javascriptSource, edited: true, direct: cell.javascriptSource.startsWith("// Direct JavaScript API;") }] as const;
       if (!kernelRef.current?.transpileJavaScript) return [cell.id, { biolangSource, error: "Switch to the Browser kernel to generate this JavaScript view." }] as const;
-      try { return [cell.id, { biolangSource, javascriptSource: await kernelRef.current!.transpileJavaScript!(biolangSource) }] as const; }
+      try {
+        const javascriptSource = await kernelRef.current!.transpileJavaScript!(biolangSource);
+        return [cell.id, { biolangSource, javascriptSource, direct: javascriptSource.startsWith("// Direct JavaScript API;") }] as const;
+      }
       catch (error) { return [cell.id, { biolangSource, error: error instanceof Error ? error.message : String(error) }] as const; }
     })).then(entries => alive && setJavascriptTranslations(current => ({ ...current, ...Object.fromEntries(entries) })));
     return () => { alive = false; };
@@ -753,16 +758,43 @@ export default function App() {
 
   function updateCell(index: number, patch: Partial<Cell>) {
     const sourceChanged = patch.source !== undefined;
-    const changesExecution = sourceChanged && cells[index]?.type === "code";
+    const javascriptChanged = Object.prototype.hasOwnProperty.call(patch, "javascriptSource");
+    const changesExecution = (sourceChanged || javascriptChanged) && cells[index]?.type === "code";
     updateDocument(activeDocumentId, document => ({
       ...document,
       cells: document.cells.map((cell, position) => {
         const updated = position === index ? { ...cell, ...patch } : cell;
         return changesExecution && position >= index && updated.type === "code" && updated.result ? { ...updated, status: "stale" } : updated;
       }),
-      dirty: sourceChanged ? true : document.dirty,
+      dirty: sourceChanged || javascriptChanged ? true : document.dirty,
     }));
     if (changesExecution) { needsResetRef.current = true; setValidThrough(current => Math.min(current, index - 1)); }
+  }
+
+  function synchronizeJavaScriptCell(index: number, cell: Cell, source: string, priorNames: string[]) {
+    clearTimeout(javascriptSyncTimers.current.get(cell.id));
+    const revision = (javascriptSyncRevisions.current.get(cell.id) ?? 0) + 1;
+    javascriptSyncRevisions.current.set(cell.id, revision);
+    const timer = window.setTimeout(async () => {
+      try {
+        const compiled = await kernelRef.current?.compileJavaScript?.(source, priorNames);
+        if (!compiled || javascriptSyncRevisions.current.get(cell.id) !== revision) return;
+        updateCell(index, { source: compiled, javascriptSource: source });
+        setJavascriptTranslations(current => ({ ...current, [cell.id]: { biolangSource: compiled, javascriptSource: source, edited: true, direct: true, syncing: false } }));
+      } catch (error) {
+        // CodeMirror already displays the precise syntax or safe-subset issue.
+        // Keep the last valid BioLang source until this JavaScript becomes valid.
+        if (javascriptSyncRevisions.current.get(cell.id) === revision) {
+          setJavascriptTranslations(current => ({ ...current, [cell.id]: {
+            biolangSource: current[cell.id]?.biolangSource ?? executableSource(cell.source), javascriptSource: source,
+            edited: true, direct: true, syncing: false, syncError: error instanceof Error ? error.message : String(error),
+          } }));
+        }
+      } finally {
+        if (javascriptSyncRevisions.current.get(cell.id) === revision) javascriptSyncTimers.current.delete(cell.id);
+      }
+    }, 320);
+    javascriptSyncTimers.current.set(cell.id, timer);
   }
 
   const editMarkdown = useCallback((index: number) => {
@@ -925,8 +957,9 @@ export default function App() {
           ? javascriptTranslations[cell.id].javascriptSource : undefined;
         if (runLanguage === "javascript" && !javascriptSource) {
           if (!kernelRef.current?.transpileJavaScript) throw new Error("This JavaScript cell has not been translated yet. Switch to the Browser kernel once to prepare its structural JavaScript frontend.");
-          javascriptSource = await kernelRef.current.transpileJavaScript(biolangSource);
-          setJavascriptTranslations(current => ({ ...current, [cell.id]: { biolangSource, javascriptSource } }));
+          const generatedSource = await kernelRef.current.transpileJavaScript(biolangSource);
+          javascriptSource = generatedSource;
+          setJavascriptTranslations(current => ({ ...current, [cell.id]: { biolangSource, javascriptSource: generatedSource, direct: generatedSource.startsWith("// Direct JavaScript API;") } }));
         }
         return [cell.id, compileNotebookCode(biolangSource, runLanguage, javascriptSource)] as const;
       }));
@@ -1955,7 +1988,8 @@ export default function App() {
     const displayedSource = cell.type === "code" && codeLanguage === "javascript"
       ? javascriptTranslations[cell.id]?.javascriptSource ?? (javascriptTranslations[cell.id]?.error ? `// Cannot translate this cell yet:\n// ${javascriptTranslations[cell.id].error}` : "// Generating structural JavaScript…")
       : cell.source;
-    const javascriptEditable = codeLanguage === "javascript" && Boolean(kernelRef.current?.executeJavaScript) && displayedSource.startsWith("// Direct JavaScript API;");
+    const javascriptSyncStatus = javascriptTranslations[cell.id];
+    const javascriptEditable = codeLanguage === "javascript" && Boolean(kernelRef.current?.executeJavaScript && kernelRef.current?.compileJavaScript) && Boolean(javascriptSyncStatus?.direct);
     const javascriptKnownNames = cells.slice(0, index).flatMap(item => {
       const source = javascriptTranslations[item.id]?.javascriptSource ?? "";
       return [...source.matchAll(/^\s*(?:let|const)\s+([A-Za-z_$][\w$]*)\s*=/gm)].map(match => match[1]);
@@ -1963,8 +1997,9 @@ export default function App() {
     return <article className={`cell cell-${cell.type} ${cell.status ?? ""}`} data-cell-index={index} key={cell.id}>
       <div className="cell-rail">{cell.type === "code" ? <><button aria-label={`${runAction.label} cell ${index + 1}`} title={cell.status === "done" ? "Run again from a clean interpreter; earlier cells will replay" : `${runAction.label}; required earlier cells run automatically`} disabled={running || kernelState !== "ready"} onClick={() => void runTo(index)}>{runAction.glyph}</button><small>{index + 1}</small><em>{runAction.state}</em></> : <><span>¶</span><small>{index + 1}</small></>}</div>
       <div className="cell-body">
-        {cell.type === "code" && <><div className="code-language-tabs" role="tablist" aria-label={`Cell ${index + 1} language`}><button role="tab" aria-selected={codeLanguage === "biolang"} className={codeLanguage === "biolang" ? "active" : ""} onClick={() => setCodeLanguage("biolang")}>BioLang</button><button role="tab" aria-selected={codeLanguage === "javascript"} className={codeLanguage === "javascript" ? "active" : ""} onClick={() => setCodeLanguage("javascript")}>JavaScript</button><span>{codeLanguage === "javascript" ? (javascriptEditable ? "Safe JavaScript API · editable · Browser BioLang kernel" : kernelKind === "browser" ? "Structural JavaScript view · edit BioLang source" : "JavaScript view · use Browser kernel to edit") : "Canonical lesson source · live checks"}</span></div><button className="cell-copy-action" aria-label={`Copy ${codeLanguage === "javascript" ? "JavaScript" : "BioLang"} code from cell ${index + 1}`} title={`Copy this ${codeLanguage === "javascript" ? "JavaScript SDK code" : "BioLang code"}`} disabled={!displayedSource} onClick={() => void copyCodeCell(cell, index, codeLanguage)}>Copy</button></>}
+        {cell.type === "code" && <><div className="code-language-tabs" role="tablist" aria-label={`Cell ${index + 1} language`}><button role="tab" aria-selected={codeLanguage === "biolang"} className={codeLanguage === "biolang" ? "active" : ""} onClick={() => setCodeLanguage("biolang")}>BioLang</button><button role="tab" aria-selected={codeLanguage === "javascript"} className={codeLanguage === "javascript" ? "active" : ""} onClick={() => setCodeLanguage("javascript")}>JavaScript</button><span>{codeLanguage === "javascript" ? (javascriptEditable ? javascriptSyncStatus?.syncError ? "Not synced · fix the highlighted JavaScript" : javascriptSyncStatus?.syncing ? "Syncing JavaScript → BioLang…" : "Safe JavaScript API · synced to BioLang" : kernelKind === "browser" ? "Structural JavaScript view · edit BioLang source" : "JavaScript view · use Browser kernel to edit") : "Canonical source · edits regenerate JavaScript"}</span></div><button className="cell-copy-action" aria-label={`Copy ${codeLanguage === "javascript" ? "JavaScript" : "BioLang"} code from cell ${index + 1}`} title={`Copy this ${codeLanguage === "javascript" ? "JavaScript SDK code" : "BioLang code"}`} disabled={!displayedSource} onClick={() => void copyCodeCell(cell, index, codeLanguage)}>Copy</button></>}
         {cell.type === "code" ? <CodeEditor
+          key={`${cell.id}-${codeLanguage}`}
           label={codeLanguage === "javascript" ? `JavaScript equivalent for cell ${index + 1}` : `BioLang cell ${index + 1}`}
           language={codeLanguage}
           value={displayedSource}
@@ -1976,7 +2011,8 @@ export default function App() {
             if (codeLanguage === "biolang") updateCell(index, { source, javascriptSource: undefined });
             else {
               updateCell(index, { javascriptSource: source });
-              setJavascriptTranslations(current => ({ ...current, [cell.id]: { biolangSource: executableSource(cell.source), javascriptSource: source, edited: true } }));
+              setJavascriptTranslations(current => ({ ...current, [cell.id]: { biolangSource: executableSource(cell.source), javascriptSource: source, edited: true, direct: true, syncing: true } }));
+              synchronizeJavaScriptCell(index, cell, source, javascriptKnownNames);
             }
           }}
           onRun={advance => {

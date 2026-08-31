@@ -8,6 +8,7 @@ describe("safe JavaScript notebook cells", () => {
     if (result.ok) {
       expect(result.bindingNames).toEqual(["values", "report"]);
       expect(result.executable).toContain("return { result: (report.mean)");
+      expect(result.biolangSource).toBe("let values = [1, 2, 3]\nlet report = summary(values)\n(report).mean");
     }
   });
 
@@ -25,5 +26,14 @@ describe("safe JavaScript notebook cells", () => {
 
   it("permits values from earlier cells", () => {
     expect(compileSafeJavaScript("await bl.mean(values)", ["values"]).ok).toBe(true);
+  });
+
+  it("produces canonical BioLang without running the JavaScript", () => {
+    const result = compileSafeJavaScript(`let mean = await bl.mean(measurements);\nlet median = await bl.median(measurements);\nlet result = { mean: mean, median: median };\nresult;`, ["measurements"]);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.bindingNames).toEqual(["mean", "median", "result"]);
+      expect(result.biolangSource).toBe("let mean = mean(measurements)\nlet median = median(measurements)\nlet result = {mean: mean, median: median}\nresult");
+    }
   });
 });

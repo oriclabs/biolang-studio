@@ -4,6 +4,7 @@ type WorkerCall =
   | { method: "initialize"; runtimeBase: string }
   | { method: "execute"; source: string }
   | { method: "executeJavaScript"; javascriptSource: string; biolangSource: string }
+  | { method: "compileJavaScript"; javascriptSource: string; priorNames: string[] }
   | { method: "transpileJavaScript"; source: string }
   | { method: "diagnostics"; source: string }
   | { method: "completions"; prefix: string }
@@ -62,6 +63,9 @@ export class WasmKernel implements Kernel {
   execute(source: string) { return this.call<ExecutionResult>({ method: "execute", source }); }
   executeJavaScript(javascriptSource: string, biolangSource: string) {
     return this.call<ExecutionResult>({ method: "executeJavaScript", javascriptSource, biolangSource });
+  }
+  compileJavaScript(javascriptSource: string, priorNames: string[]) {
+    return this.call<string>({ method: "compileJavaScript", javascriptSource, priorNames });
   }
   transpileJavaScript(source: string) { return this.call<string>({ method: "transpileJavaScript", source }); }
   diagnostics(source: string) { return this.call<LanguageDiagnostic[]>({ method: "diagnostics", source }); }

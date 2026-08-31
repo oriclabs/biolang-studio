@@ -90,11 +90,19 @@ async function handle(request: WorkerRequest): Promise<unknown> {
       if (!exactGenerated && !directSource) throw new Error("This generated JavaScript cell is read-only because it needs the structural frontend. Edit its BioLang source instead.");
       const safe = directSource ? compileSafeJavaScript(request.javascriptSource, javascriptVariables.keys()) : null;
       if (safe && !safe.ok) throw new Error(safe.issues.map(item => item.message).join("\n"));
-      const bindingNames = safe?.ok ? safe.bindingNames : [];
-      const priorBindings = [...javascriptVariables.entries()].filter(([name]) => !(safe?.ok ? safe.declared : bindingNames).includes(name));
-      const executable = directSource && safe?.ok
-        ? safe.executable
-        : request.javascriptSource.replace(/\nresult;\s*$/, "\nreturn result;");
+      if (safe?.ok) {
+        const result = JSON.parse(wasm.evaluate(safe.biolangSource)) as ExecutionResult;
+        result.compiledSource = safe.biolangSource;
+        result.elapsedMs = Math.round((performance.now() - started) * 10) / 10;
+        result.backend = "browser";
+        if (result.ok) {
+          const bio = await loadJavaScriptSdk();
+          for (const name of safe.bindingNames) javascriptVariables.set(name, (bio.ref as (name: string) => unknown)(name));
+        }
+        return result;
+      }
+      const priorBindings = [...javascriptVariables.entries()];
+      const executable = request.javascriptSource.replace(/\nresult;\s*$/, "\nreturn result;");
       const run = new Function(
         "bio", "bl", ...priorBindings.map(([name]) => name),
         `"use strict"; return (async () => { ${executable} })()`,
@@ -129,31 +137,15 @@ async function handle(request: WorkerRequest): Promise<unknown> {
           return (...args: unknown[]) => wrapExpression((bio.call as (name: string, ...args: unknown[]) => unknown)(property, ...args));
         },
       });
-      const value = await run(bio, bl, ...priorBindings.map(([, binding]) => binding)) as
-        | ExecutionResult
-        | { result: unknown; bindings: Record<string, unknown> };
-      let result: ExecutionResult;
-      if (!directSource) {
-        result = value as ExecutionResult;
-      } else {
-        const directValue = value as { result: unknown; bindings: Record<string, unknown> };
-        const statements = bindingNames.map(name =>
-          (bio.let_ as (name: string, value: unknown) => unknown)(name, directValue.bindings[name]));
-        let finalExpression = directValue.result;
-        const matchingBinding = bindingNames.find(name => directValue.bindings[name] === directValue.result);
-        if (matchingBinding) finalExpression = (bio.ref as (name: string) => unknown)(matchingBinding);
-        statements.push((bio.expr_ as (value: unknown) => unknown)(finalExpression));
-        const compiledProgram = (bio.program as (...items: unknown[]) => unknown)(...statements);
-        const compiledSource = bio.sourceOf(compiledProgram);
-        result = direct.run(compiledProgram);
-        result.compiledSource = compiledSource;
-        if (result.ok) {
-          for (const name of bindingNames) javascriptVariables.set(name, direct.ref(name));
-        }
-      }
+      const result = await run(bio, bl, ...priorBindings.map(([, binding]) => binding)) as ExecutionResult;
       result.elapsedMs = Math.round((performance.now() - started) * 10) / 10;
       result.backend = "browser";
       return result;
+    }
+    case "compileJavaScript": {
+      const safe = compileSafeJavaScript(request.javascriptSource, request.priorNames);
+      if (!safe.ok) throw new Error(safe.issues.map(item => item.message).join("\n"));
+      return safe.biolangSource;
     }
     case "transpileJavaScript": {
       const result = JSON.parse(wasm.transpile_javascript(request.source)) as { ok: boolean; source?: string; error?: string };

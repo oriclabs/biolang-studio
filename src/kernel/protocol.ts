@@ -137,6 +137,7 @@ export interface Kernel {
   initialize(): Promise<KernelCapabilities>;
   execute(source: string): Promise<ExecutionResult>;
   executeJavaScript?(javascriptSource: string, biolangSource: string): Promise<ExecutionResult>;
+  compileJavaScript?(javascriptSource: string, priorNames: string[]): Promise<string>;
   transpileJavaScript?(source: string): Promise<string>;
   diagnostics?(source: string): Promise<LanguageDiagnostic[]>;
   completions?(prefix?: string): Promise<LanguageCompletion[]>;
@@ -159,6 +160,7 @@ export type WorkerRequest =
   | { id: number; method: "initialize"; runtimeBase: string }
   | { id: number; method: "execute"; source: string }
   | { id: number; method: "executeJavaScript"; javascriptSource: string; biolangSource: string }
+  | { id: number; method: "compileJavaScript"; javascriptSource: string; priorNames: string[] }
   | { id: number; method: "transpileJavaScript"; source: string }
   | { id: number; method: "diagnostics"; source: string }
   | { id: number; method: "completions"; prefix: string }

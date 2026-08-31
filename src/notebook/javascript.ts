@@ -8,11 +8,12 @@ export type SafeJavaScript = {
   declared: string[];
   bindingNames: string[];
   executable: string;
+  biolangSource: string;
 } | { ok: false; issues: JavaScriptIssue[] };
 
 const FORBIDDEN_PROPERTIES = new Set(["__proto__", "prototype", "constructor"]);
 const BLOCKED_BL_METHODS = new Set([
-  "connectSomer", "exportVariable", "raw", "registerModule", "reset", "run",
+  "connectSomer", "define", "exportVariable", "invoke", "raw", "ref", "registerModule", "reset", "run",
 ]);
 const GLOBAL_NAMES = new Set([
   "document", "eval", "fetch", "Function", "globalThis", "importScripts", "location",
@@ -162,10 +163,60 @@ export function compileSafeJavaScript(source: string, priorNames: Iterable<strin
   }
   if (issues.length) return { ok: false, issues };
 
+  const expressionSource = (node: Node): string => {
+    switch (node.type) {
+      case "Literal": return node.value === null ? "nil" : typeof node.value === "string" ? JSON.stringify(node.value) : String(node.value);
+      case "Identifier": return String(node.name);
+      case "ArrayExpression": return `[${(node.elements as Array<Node | null>).map(element => element ? expressionSource(element) : "nil").join(", ")}]`;
+      case "ObjectExpression": return `{${(node.properties as Node[]).map(property => {
+        const key = propertyName(property.key as Node)!;
+        const renderedKey = /^[A-Za-z_][A-Za-z0-9_]*$/.test(key) ? key : JSON.stringify(key);
+        return `${renderedKey}: ${expressionSource(property.value as Node)}`;
+      }).join(", ")}}`;
+      case "AwaitExpression": return expressionSource(node.argument as Node);
+      case "UnaryExpression": {
+        const operator = String(node.operator) === "!" ? "not " : String(node.operator);
+        return `(${operator}${expressionSource(node.argument as Node)})`;
+      }
+      case "BinaryExpression": {
+        const operators: Record<string, string> = { "===": "==", "!==": "!=" };
+        return `(${expressionSource(node.left as Node)} ${operators[String(node.operator)] ?? String(node.operator)} ${expressionSource(node.right as Node)})`;
+      }
+      case "LogicalExpression": {
+        const operators: Record<string, string> = { "&&": "and", "||": "or" };
+        return `(${expressionSource(node.left as Node)} ${operators[String(node.operator)] ?? String(node.operator)} ${expressionSource(node.right as Node)})`;
+      }
+      case "ConditionalExpression": return `(${expressionSource(node.consequent as Node)} if ${expressionSource(node.test as Node)} else ${expressionSource(node.alternate as Node)})`;
+      case "MemberExpression": {
+        const object = expressionSource(node.object as Node);
+        if (node.computed) return `(${object})[${expressionSource(node.property as Node)}]`;
+        return `(${object}).${propertyName(node.property as Node)}`;
+      }
+      case "CallExpression": {
+        const callee = node.callee as Node;
+        const method = propertyName((callee.property as Node));
+        return `${method}(${(node.arguments as Node[]).map(expressionSource).join(", ")})`;
+      }
+      case "ChainExpression": return expressionSource(node.expression as Node);
+      default: throw new Error(`Validated JavaScript node '${node.type}' has no BioLang renderer.`);
+    }
+  };
+
+  const lines: string[] = [];
+  for (const statement of body) {
+    if (statement.type === "VariableDeclaration") {
+      for (const declaration of statement.declarations as Node[]) {
+        lines.push(`let ${String((declaration.id as Node).name)} = ${expressionSource(declaration.init as Node)}`);
+      }
+    } else if (statement.type === "ExpressionStatement") {
+      lines.push(expressionSource(statement.expression as Node));
+    }
+  }
+
   const resultExpression = (last as Node).expression as Node;
-  const bindingNames = declared.filter(name => !(resultExpression.type === "Identifier" && resultExpression.name === name));
+  const bindingNames = [...declared];
   const beforeResult = source.slice(0, last!.start);
   const expression = source.slice(resultExpression.start, resultExpression.end);
   const executable = `${beforeResult}\nreturn { result: (${expression}), bindings: { ${bindingNames.join(", ")} } };`;
-  return { ok: true, declared, bindingNames, executable };
+  return { ok: true, declared, bindingNames, executable, biolangSource: lines.join("\n") };
 }
