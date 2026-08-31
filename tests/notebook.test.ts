@@ -37,9 +37,10 @@ describe("BioLang notebook format", () => {
 describe("paired JavaScript lesson view", () => {
   it("keeps structural JavaScript separate from the canonical kernel source", () => {
     const source = "let measurements = [12, 14, 15]\nsummary(measurements)";
-    const generated = "const result = await bio.program(bio.let_(\"measurements\", [12, 14, 15]), bio.expr_(bio.callExpr(\"summary\", [bio.ref(\"measurements\")]))).run(bl);";
+    const generated = "let measurements = [12, 14, 15];\nlet result = await bl.summary(measurements);\nresult;";
     const compiled = compileNotebookCode(source, "javascript", generated);
-    expect(compiled.frontendSource).toContain("bio.let_");
+    expect(compiled.frontendSource).toContain("bl.summary(measurements)");
+    expect(compiled.frontendSource).not.toContain("bl.define");
     expect(compiled.frontendSource).not.toContain("`let measurements");
     expect(compiled.biolangSource).toBe(source);
   });
@@ -54,9 +55,9 @@ describe("paired JavaScript lesson view", () => {
   it("compiles both frontends to the same canonical kernel source", () => {
     const source = "let values = [1, 2, 3]\nmean(values)";
     const biolang = compileNotebookCode(source, "biolang");
-    const javascript = compileNotebookCode(source, "javascript", "await bio.program().run(bl)");
+    const javascript = compileNotebookCode(source, "javascript", "await bl.mean(values)");
     expect(biolang.frontendSource).toBe(source);
-    expect(javascript.frontendSource).toContain("bio.program");
+    expect(javascript.frontendSource).toContain("bl.mean");
     expect(javascript.biolangSource).toBe(biolang.biolangSource);
   });
 });

@@ -26,11 +26,11 @@ test("shows every existing lesson cell as paired BioLang and JavaScript", async 
   const firstCell = page.locator("article.cell-code").first();
   await expect(firstCell.getByRole("tab", { name: "JavaScript" })).toHaveAttribute("aria-selected", "true");
   await expect(page.getByLabel("Notebook code language")).toHaveValue("javascript");
-  await expect(firstCell.getByLabel("JavaScript equivalent for cell 2")).toContainText("bio.program(");
-  await expect(firstCell.getByLabel("JavaScript equivalent for cell 2")).toContainText('bio.let_("measurements"');
+  await expect(firstCell.getByLabel("JavaScript equivalent for cell 2")).toContainText("let measurements = [12, 14, 15");
+  await expect(firstCell.getByLabel("JavaScript equivalent for cell 2")).toContainText("await bl.summary(measurements)");
   await expect(firstCell.getByLabel("JavaScript equivalent for cell 2")).not.toContainText("`let measurements");
   await firstCell.getByRole("button", { name: /Copy JavaScript code/ }).click();
-  expect(await page.evaluate(() => navigator.clipboard.readText())).toContain("await bio.program(");
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toContain("await bl.summary(measurements)");
 
   await expect(page.locator(".status")).toHaveText("ready", { timeout: 30_000 });
   await page.getByRole("button", { name: /Run all · JS/ }).click();

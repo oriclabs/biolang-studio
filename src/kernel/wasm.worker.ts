@@ -16,6 +16,7 @@ let runtime: WasmModule | null = null;
 type JavaScriptSdk = { sourceOf(value: unknown): string; [name: string]: unknown };
 let javascriptSdk: JavaScriptSdk | null = null;
 let runtimeBase = "";
+const javascriptVariables = new Map<string, unknown>();
 
 // wasm-bindgen currently imports the file bridge from `window`. A worker has no
 // Window object, so expose the worker global under that name before loading WASM.
@@ -82,10 +83,72 @@ async function handle(request: WorkerRequest): Promise<unknown> {
       if (!generated.ok || !generated.source) throw new Error(generated.error || "Cannot translate this cell to JavaScript.");
       if (generated.source !== request.javascriptSource) throw new Error("The JavaScript frontend changed after it was generated. Switch to BioLang or regenerate the JavaScript cell before running it.");
       const bio = await loadJavaScriptSdk();
-      const executable = request.javascriptSource.replace(/\nresult;\s*$/, "\nreturn result;");
-      const run = new Function("bio", "bl", `"use strict"; return (async () => { ${executable} })()`);
-      const bl = { run(program: unknown) { return JSON.parse(wasm.evaluate(bio.sourceOf(program as never))) as ExecutionResult; } };
-      const result = await run(bio, bl) as ExecutionResult;
+      const directSource = request.javascriptSource.startsWith("// Direct JavaScript API;");
+      const declared = directSource
+        ? [...request.javascriptSource.matchAll(/^let ([A-Za-z_$][A-Za-z0-9_$]*) =/gm)].map(match => match[1])
+        : [];
+      const resultName = declared.at(-1);
+      const bindingNames = resultName ? declared.slice(0, -1) : [];
+      const priorBindings = [...javascriptVariables.entries()].filter(([name]) => !bindingNames.includes(name));
+      const executable = directSource && resultName
+        ? request.javascriptSource.replace(
+            new RegExp(`\\n${resultName};\\s*$`),
+            `\nreturn { result: ${resultName}, bindings: { ${bindingNames.join(", ")} } };`,
+          )
+        : request.javascriptSource.replace(/\nresult;\s*$/, "\nreturn result;");
+      const run = new Function(
+        "bio", "bl", ...priorBindings.map(([name]) => name),
+        `"use strict"; return (async () => { ${executable} })()`,
+      );
+      const wrapExpression = (expression: unknown): unknown => {
+        if (!expression || typeof expression !== "object" || typeof (expression as { toBioLang?: unknown }).toBioLang !== "function") return expression;
+        return new Proxy(expression as Record<PropertyKey, unknown>, {
+          get(target, property, receiver) {
+            if (property === "then") return undefined;
+            if (property === "source" || property === "children" || property === "toBioLang" || typeof property === "symbol") {
+              const value = Reflect.get(target, property, receiver);
+              return typeof value === "function" ? value.bind(target) : value;
+            }
+            return wrapExpression((bio.field as (object: unknown, name: string) => unknown)(target, String(property)));
+          },
+        });
+      };
+      const direct = {
+        run(program: unknown) { return JSON.parse(wasm.evaluate(bio.sourceOf(program))) as ExecutionResult; },
+        define(name: string, value: unknown) {
+          const result = this.run((bio.program as (...items: unknown[]) => unknown)((bio.let_ as (name: string, value: unknown) => unknown)(name, value)));
+          if (!result.ok) throw new Error(result.error || `Cannot define ${name}`);
+          return (bio.ref as (name: string) => unknown)(name);
+        },
+        ref(name: string) { return wrapExpression((bio.ref as (name: string) => unknown)(name)); },
+        invoke(name: string, ...args: unknown[]) { return wrapExpression((bio.call as (name: string, ...args: unknown[]) => unknown)(name, ...args)); },
+      };
+      const bl = new Proxy(direct, {
+        get(target, property) {
+          if (property === "then") return undefined;
+          if (typeof property !== "string" || property in target) return Reflect.get(target, property, target);
+          return (...args: unknown[]) => wrapExpression((bio.call as (name: string, ...args: unknown[]) => unknown)(property, ...args));
+        },
+      });
+      const value = await run(bio, bl, ...priorBindings.map(([, binding]) => binding)) as
+        | ExecutionResult
+        | { result: unknown; bindings: Record<string, unknown> };
+      let result: ExecutionResult;
+      if (!directSource) {
+        result = value as ExecutionResult;
+      } else {
+        const directValue = value as { result: unknown; bindings: Record<string, unknown> };
+        const statements = bindingNames.map(name =>
+          (bio.let_ as (name: string, value: unknown) => unknown)(name, directValue.bindings[name]));
+        let finalExpression = directValue.result;
+        const matchingBinding = bindingNames.find(name => directValue.bindings[name] === directValue.result);
+        if (matchingBinding) finalExpression = (bio.ref as (name: string) => unknown)(matchingBinding);
+        statements.push((bio.expr_ as (value: unknown) => unknown)(finalExpression));
+        result = direct.run((bio.program as (...items: unknown[]) => unknown)(...statements));
+        if (result.ok) {
+          for (const name of bindingNames) javascriptVariables.set(name, direct.ref(name));
+        }
+      }
       result.elapsedMs = Math.round((performance.now() - started) * 10) / 10;
       result.backend = "browser";
       return result;
@@ -97,6 +160,7 @@ async function handle(request: WorkerRequest): Promise<unknown> {
     }
     case "reset":
       wasm.reset();
+      javascriptVariables.clear();
       return null;
     case "clearFiles":
       files.clear();
