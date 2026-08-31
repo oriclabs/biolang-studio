@@ -1,4 +1,4 @@
-import type { AttachedFile, ExecutionResult, Kernel, KernelCapabilities, LanguageCompletion, LanguageDiagnostic, VariableExport, VariableExportFormat, VariablePage, VariableSummary, WorkerRequest, WorkerResponse } from "./protocol";
+import type { AttachedFile, ExecutionResult, JavaScriptCompilation, Kernel, KernelCapabilities, LanguageCompletion, LanguageDiagnostic, VariableExport, VariableExportFormat, VariablePage, VariableSummary, WorkerRequest, WorkerResponse } from "./protocol";
 
 type WorkerCall =
   | { method: "initialize"; runtimeBase: string }
@@ -65,7 +65,7 @@ export class WasmKernel implements Kernel {
     return this.call<ExecutionResult>({ method: "executeJavaScript", javascriptSource, biolangSource });
   }
   compileJavaScript(javascriptSource: string, priorNames: string[]) {
-    return this.call<string>({ method: "compileJavaScript", javascriptSource, priorNames });
+    return this.call<JavaScriptCompilation>({ method: "compileJavaScript", javascriptSource, priorNames });
   }
   transpileJavaScript(source: string) { return this.call<string>({ method: "transpileJavaScript", source }); }
   diagnostics(source: string) { return this.call<LanguageDiagnostic[]>({ method: "diagnostics", source }); }

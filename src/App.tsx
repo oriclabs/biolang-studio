@@ -30,7 +30,7 @@ import { applyStudioTheme, readStudioTheme, saveStudioTheme, type StudioTheme } 
 import { CodeEditor } from "./CodeEditor";
 
 type Cell = NotebookCell & { result?: ExecutionResult; editing?: boolean };
-type JavaScriptTranslation = { biolangSource: string; javascriptSource?: string; error?: string; edited?: boolean; direct?: boolean; syncing?: boolean; syncError?: string };
+type JavaScriptTranslation = { biolangSource: string; javascriptSource?: string; error?: string; edited?: boolean; direct?: boolean; syncing?: boolean; independent?: boolean; syncError?: string };
 type Notice = { tone: "info" | "good" | "bad"; text: string; id?: string } | null;
 const MARKDOWN_COMPONENTS = markdownComponents();
 const INITIAL_NOTICE: NonNullable<Notice> = { id: "welcome", tone: "info", text: "Run any code cell; required earlier cells run automatically." };
@@ -514,7 +514,11 @@ export default function App() {
     if (!pending.length) return;
     void Promise.all(pending.map(async cell => {
       const biolangSource = executableSource(cell.source);
-      if (cell.javascriptSource) return [cell.id, { biolangSource, javascriptSource: cell.javascriptSource, edited: true, direct: cell.javascriptSource.startsWith("// Direct JavaScript API;") }] as const;
+      if (cell.javascriptSource) return [cell.id, {
+        biolangSource, javascriptSource: cell.javascriptSource, edited: true,
+        direct: cell.javascriptSource.startsWith("// Direct JavaScript API;"),
+        independent: Boolean(cell.javascriptIndependent),
+      }] as const;
       if (!kernelRef.current?.transpileJavaScript) return [cell.id, { biolangSource, error: "Switch to the Browser kernel to generate this JavaScript view." }] as const;
       try {
         const javascriptSource = await kernelRef.current!.transpileJavaScript!(biolangSource);
@@ -777,10 +781,19 @@ export default function App() {
     javascriptSyncRevisions.current.set(cell.id, revision);
     const timer = window.setTimeout(async () => {
       try {
-        const compiled = await kernelRef.current?.compileJavaScript?.(source, priorNames);
-        if (!compiled || javascriptSyncRevisions.current.get(cell.id) !== revision) return;
-        updateCell(index, { source: compiled, javascriptSource: source });
-        setJavascriptTranslations(current => ({ ...current, [cell.id]: { biolangSource: compiled, javascriptSource: source, edited: true, direct: true, syncing: false } }));
+        const compilation = await kernelRef.current?.compileJavaScript?.(source, priorNames);
+        if (!compilation || javascriptSyncRevisions.current.get(cell.id) !== revision) return;
+        if (!compilation.syncable || !compilation.biolangSource) {
+          updateCell(index, { javascriptSource: source, javascriptIndependent: true });
+          setJavascriptTranslations(current => ({ ...current, [cell.id]: {
+            biolangSource: current[cell.id]?.biolangSource ?? executableSource(cell.source), javascriptSource: source,
+            edited: true, direct: true, syncing: false, independent: true,
+          } }));
+          return;
+        }
+        const compiled = compilation.biolangSource;
+        updateCell(index, { source: compiled, javascriptSource: source, javascriptIndependent: false });
+        setJavascriptTranslations(current => ({ ...current, [cell.id]: { biolangSource: compiled, javascriptSource: source, edited: true, direct: true, syncing: false, independent: false } }));
       } catch (error) {
         // CodeMirror already displays the precise syntax or safe-subset issue.
         // Keep the last valid BioLang source until this JavaScript becomes valid.
@@ -931,8 +944,8 @@ export default function App() {
       setNotice({ tone: "info", text: "BioLang is still starting. Run will be available when the kernel status changes to ready." });
       return;
     }
-    if (codeLanguage === "javascript" && cells.slice(0, end + 1).some(cell => cell.type === "code" && cell.javascriptSource) && !kernelRef.current.executeJavaScript) {
-      setNotice({ tone: "info", text: "Edited JavaScript cells run in the Browser kernel. Desktop and SOMER can run the canonical BioLang tab; the JavaScript SDK can also submit generated BioLang programs directly to SOMER." });
+    if (codeLanguage === "javascript" && cells.slice(0, end + 1).some(cell => cell.type === "code" && cell.javascriptIndependent) && !kernelRef.current.executeJavaScript) {
+      setNotice({ tone: "info", text: "JavaScript-owned cells run in the Browser kernel. Equivalent synchronized JavaScript can use the canonical BioLang tab with Desktop or SOMER; JavaScript can also submit an explicit BioLang program through the SOMER SDK." });
       return;
     }
     if (pendingLessonData.length) {
@@ -1020,7 +1033,7 @@ export default function App() {
       }
       await refreshVariables();
       runSucceeded = true;
-      setNotice({ tone: "good", text: `Finished through cell ${end + 1} using ${runLanguage === "javascript" ? "JavaScript compiled to BioLang" : "BioLang"}. Earlier code cells were run when needed.` });
+      setNotice({ tone: "good", text: `Finished through cell ${end + 1} using ${runLanguage === "javascript" ? "JavaScript with BioLang WASM" : "BioLang"}. Earlier code cells were run when needed.` });
     } catch (error) {
       runError = stopRequestedRef.current ? "Cancelled by user" : error instanceof Error ? error.message : String(error);
       if (stopRequestedRef.current) updateDocument(runNotebookId, document => ({ ...document, cells: document.cells.map(cell => cell.status === "running" ? { ...cell, status: "stale" } : cell) }));
@@ -1989,7 +2002,7 @@ export default function App() {
       ? javascriptTranslations[cell.id]?.javascriptSource ?? (javascriptTranslations[cell.id]?.error ? `// Cannot translate this cell yet:\n// ${javascriptTranslations[cell.id].error}` : "// Generating structural JavaScript…")
       : cell.source;
     const javascriptSyncStatus = javascriptTranslations[cell.id];
-    const javascriptEditable = codeLanguage === "javascript" && Boolean(kernelRef.current?.executeJavaScript && kernelRef.current?.compileJavaScript) && Boolean(javascriptSyncStatus?.direct);
+    const javascriptEditable = codeLanguage === "javascript" && Boolean(kernelRef.current?.executeJavaScript && kernelRef.current?.compileJavaScript);
     const javascriptKnownNames = cells.slice(0, index).flatMap(item => {
       const source = javascriptTranslations[item.id]?.javascriptSource ?? "";
       return [...source.matchAll(/^\s*(?:let|const)\s+([A-Za-z_$][\w$]*)\s*=/gm)].map(match => match[1]);
@@ -1997,7 +2010,7 @@ export default function App() {
     return <article className={`cell cell-${cell.type} ${cell.status ?? ""}`} data-cell-index={index} key={cell.id}>
       <div className="cell-rail">{cell.type === "code" ? <><button aria-label={`${runAction.label} cell ${index + 1}`} title={cell.status === "done" ? "Run again from a clean interpreter; earlier cells will replay" : `${runAction.label}; required earlier cells run automatically`} disabled={running || kernelState !== "ready"} onClick={() => void runTo(index)}>{runAction.glyph}</button><small>{index + 1}</small><em>{runAction.state}</em></> : <><span>¶</span><small>{index + 1}</small></>}</div>
       <div className="cell-body">
-        {cell.type === "code" && <><div className="code-language-tabs" role="tablist" aria-label={`Cell ${index + 1} language`}><button role="tab" aria-selected={codeLanguage === "biolang"} className={codeLanguage === "biolang" ? "active" : ""} onClick={() => setCodeLanguage("biolang")}>BioLang</button><button role="tab" aria-selected={codeLanguage === "javascript"} className={codeLanguage === "javascript" ? "active" : ""} onClick={() => setCodeLanguage("javascript")}>JavaScript</button><span>{codeLanguage === "javascript" ? (javascriptEditable ? javascriptSyncStatus?.syncError ? "Not synced · fix the highlighted JavaScript" : javascriptSyncStatus?.syncing ? "Syncing JavaScript → BioLang…" : "Safe JavaScript API · synced to BioLang" : kernelKind === "browser" ? "Structural JavaScript view · edit BioLang source" : "JavaScript view · use Browser kernel to edit") : "Canonical source · edits regenerate JavaScript"}</span></div><button className="cell-copy-action" aria-label={`Copy ${codeLanguage === "javascript" ? "JavaScript" : "BioLang"} code from cell ${index + 1}`} title={`Copy this ${codeLanguage === "javascript" ? "JavaScript SDK code" : "BioLang code"}`} disabled={!displayedSource} onClick={() => void copyCodeCell(cell, index, codeLanguage)}>Copy</button></>}
+        {cell.type === "code" && <><div className="code-language-tabs" role="tablist" aria-label={`Cell ${index + 1} language`}><button role="tab" aria-selected={codeLanguage === "biolang"} className={codeLanguage === "biolang" ? "active" : ""} onClick={() => setCodeLanguage("biolang")}>BioLang</button><button role="tab" aria-selected={codeLanguage === "javascript"} className={codeLanguage === "javascript" ? "active" : ""} onClick={() => setCodeLanguage("javascript")}>JavaScript</button><span>{codeLanguage === "javascript" ? (javascriptEditable ? javascriptSyncStatus?.syncError ? "Cannot run · fix the highlighted JavaScript" : javascriptSyncStatus?.syncing ? "Checking JavaScript…" : javascriptSyncStatus?.independent ? "JavaScript + bl package · BioLang calls use WASM" : "JavaScript · automatically synchronized where equivalent" : "JavaScript view · use Browser kernel to edit") : "Canonical source · edits regenerate JavaScript"}</span></div><button className="cell-copy-action" aria-label={`Copy ${codeLanguage === "javascript" ? "JavaScript" : "BioLang"} code from cell ${index + 1}`} title={`Copy this ${codeLanguage === "javascript" ? "JavaScript SDK code" : "BioLang code"}`} disabled={!displayedSource} onClick={() => void copyCodeCell(cell, index, codeLanguage)}>Copy</button></>}
         {cell.type === "code" ? <CodeEditor
           key={`${cell.id}-${codeLanguage}`}
           label={codeLanguage === "javascript" ? `JavaScript equivalent for cell ${index + 1}` : `BioLang cell ${index + 1}`}
@@ -2008,7 +2021,7 @@ export default function App() {
           diagnostics={source => kernelRef.current?.diagnostics?.(source) ?? Promise.resolve([])}
           completions={prefix => kernelRef.current?.completions?.(prefix) ?? Promise.resolve([])}
           onChange={source => {
-            if (codeLanguage === "biolang") updateCell(index, { source, javascriptSource: undefined });
+            if (codeLanguage === "biolang") updateCell(index, { source, javascriptSource: undefined, javascriptIndependent: undefined });
             else {
               updateCell(index, { javascriptSource: source });
               setJavascriptTranslations(current => ({ ...current, [cell.id]: { biolangSource: executableSource(cell.source), javascriptSource: source, edited: true, direct: true, syncing: true } }));
@@ -2043,7 +2056,7 @@ export default function App() {
       <nav className="toolbar">
         {workspaceView === "notebook" && <button onClick={() => setStatisticsGuideOpen(true)}>Guided stats</button>}
         {workspaceView === "notebook" ? <><button onClick={newNotebook}>New</button><button onClick={openFile}>Open</button><button onClick={saveFile}>Save</button><button onClick={() => setExportOpen(true)}>Export</button>{nativeDocumentsAvailable() && <button onClick={() => void saveDesktopNotebook(true)}>Save as…</button>}<details className="workspace-file-menu"><summary>Workspace{workspaceDirty ? " ●" : ""}</summary><div><button onClick={event => { openWorkspace(); event.currentTarget.closest("details")?.removeAttribute("open"); }}>Open .blw</button><button onClick={event => { saveWorkspaceFile(); event.currentTarget.closest("details")?.removeAttribute("open"); }}>{nativeDocumentsAvailable() ? "Save .blw" : "Export .blw"}</button>{nativeDocumentsAvailable() && <button onClick={event => { saveWorkspaceFile(true); event.currentTarget.closest("details")?.removeAttribute("open"); }}>Save .blw as…</button>}<button disabled={!activeDocument.lastRun} onClick={event => { saveRunRecord(); event.currentTarget.closest("details")?.removeAttribute("open"); }}>Export latest run record</button>{recentNativeDocuments.length > 0 && <div className="recent-native"><small>Recent Desktop files</small>{recentNativeDocuments.map(recent => <button key={recent.path} title={recent.path} onClick={event => { openRecentDocument(recent); event.currentTarget.closest("details")?.removeAttribute("open"); }}><span>{recent.filename}</span><em>{recent.kind}</em></button>)}</div>}</div></details>
-          <button className="primary" disabled={running || codeCount === 0 || kernelState !== "ready"} title={kernelState !== "ready" ? "BioLang is still starting" : codeLanguage === "javascript" ? "Compile the displayed JavaScript frontend to BioLang and run it" : "Run the BioLang cells"} onClick={() => pendingLessonData.length ? void prepareAndRunAll() : void runTo(cells.length - 1, true)}>▶ {pendingLessonData.length ? "Prepare & run all" : "Run all"} · {codeLanguage === "javascript" ? "JS" : "BL"}</button>
+          <button className="primary" disabled={running || codeCount === 0 || kernelState !== "ready"} title={kernelState !== "ready" ? "BioLang is still starting" : codeLanguage === "javascript" ? "Run the displayed JavaScript; equivalent cells synchronize to BioLang and bl calls use WASM" : "Run the BioLang cells"} onClick={() => pendingLessonData.length ? void prepareAndRunAll() : void runTo(cells.length - 1, true)}>▶ {pendingLessonData.length ? "Prepare & run all" : "Run all"} · {codeLanguage === "javascript" ? "JS" : "BL"}</button>
           {running && <button onClick={() => void stopRun()}>Stop</button>}</> : <button onClick={() => void refreshRegistry()}>Refresh registry</button>}
       </nav>
       <div className="kernel-switch">
@@ -2093,7 +2106,7 @@ export default function App() {
           {activeRegistryLesson && <><div><dt>Licence</dt><dd>{activeRegistryLesson.licence}</dd></div><div><dt>Validation</dt><dd>{activeRegistryLesson.validation}</dd></div></>}
           <div><dt>Manifest SHA-256</dt><dd><code>{activeDocument.lessonManifestSha256 ?? activeInstalledLesson?.manifestSha256 ?? "Not recorded"}</code></dd></div>
           <div><dt>Declared data</dt><dd>{lesson.datasets.length ? `${lesson.datasets.length} checksum-pinned file${lesson.datasets.length === 1 ? "" : "s"}` : "None"}</dd></div>
-          <div><dt>Latest run</dt><dd>{activeDocument.lastRun ? `${activeDocument.lastRun.success ? "Successful" : "Failed"} · ${activeDocument.lastRun.notebook.sourceLanguage === "javascript" ? "JavaScript → BioLang" : "BioLang"} · ${activeDocument.lastRun.runtime.runtime} · ${activeDocument.lastRun.finishedAt}` : "Not run in this workspace"}</dd></div>
+          <div><dt>Latest run</dt><dd>{activeDocument.lastRun ? `${activeDocument.lastRun.success ? "Successful" : "Failed"} · ${activeDocument.lastRun.notebook.sourceLanguage === "javascript" ? "JavaScript + BioLang WASM" : "BioLang"} · ${activeDocument.lastRun.runtime.runtime} · ${activeDocument.lastRun.finishedAt}` : "Not run in this workspace"}</dd></div>
         </dl>{lesson.datasets.length > 0 && <details><summary>Dataset checksums</summary>{lesson.datasets.map(dataset => <code key={dataset.id}>{dataset.path} · {dataset.sha256}</code>)}</details>}</div></details>
         <details className="notebook-share"><summary>Share…</summary><div>{activeRegistryLesson && <button onClick={() => void copyCatalogueLink(activeRegistryLesson)}>Copy catalogue link</button>}<button onClick={() => void shareActiveLesson()}>Copy Studio link</button>{activeRegistryLesson && <button onClick={() => void copyChecksumLessonLink(activeRegistryLesson)}>Copy checksum link</button>}</div></details><button title="Replace edited cells and outputs with the lesson package version; prepared data is kept" onClick={() => void restoreOriginalLesson()}>Restore original</button>
       </div>}</div>

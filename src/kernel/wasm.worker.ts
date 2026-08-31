@@ -1,5 +1,6 @@
 import type { AttachedFile, ExecutionResult, VariableExportFormat, WorkerRequest, WorkerResponse } from "./protocol";
 import { compileSafeJavaScript } from "../notebook/javascript";
+import { prepareStandardJavaScript } from "../notebook/standard-javascript";
 
 type WasmModule = {
   default: (input?: unknown) => Promise<unknown>;
@@ -16,10 +17,23 @@ type WasmModule = {
 
 const files = new Map<string, string>();
 let runtime: WasmModule | null = null;
-type JavaScriptSdk = { sourceOf(value: unknown): string; [name: string]: unknown };
+type JavaScriptSdk = {
+  sourceOf(value: unknown): string;
+  BioLangSession: new (wasm: WasmModule) => StandardBioLangSession;
+  [name: string]: unknown;
+};
+type StandardBioLangSession = {
+  run(source: unknown): ExecutionResult;
+  reset(): void;
+  variables(): Array<{ name?: string }>;
+  exportVariable(name: string, options?: { format?: string; maximumBytes?: number }): Uint8Array;
+  [name: string]: unknown;
+};
 let javascriptSdk: JavaScriptSdk | null = null;
+let standardSession: StandardBioLangSession | null = null;
 let runtimeBase = "";
 const javascriptVariables = new Map<string, unknown>();
+const standardJavaScriptScope: Record<string, unknown> = Object.create(null);
 
 // wasm-bindgen currently imports the file bridge from `window`. A worker has no
 // Window object, so expose the worker global under that name before loading WASM.
@@ -47,9 +61,83 @@ async function loadRuntime() {
 
 async function loadJavaScriptSdk() {
   if (javascriptSdk) return javascriptSdk;
-  const sdkUrl = new URL("biolang-dsl.js", runtimeBase).href;
-  javascriptSdk = await import(/* @vite-ignore */ sdkUrl) as JavaScriptSdk;
+  const [dsl, session] = await Promise.all([
+    import(/* @vite-ignore */ new URL("biolang-dsl.js", runtimeBase).href),
+    import(/* @vite-ignore */ new URL("session.js", runtimeBase).href),
+  ]);
+  javascriptSdk = { ...dsl, ...session } as JavaScriptSdk;
   return javascriptSdk;
+}
+
+async function loadStandardSession(wasm: WasmModule) {
+  if (standardSession) return standardSession;
+  const sdk = await loadJavaScriptSdk();
+  standardSession = new sdk.BioLangSession(wasm);
+  return standardSession;
+}
+
+function exportedJavaScriptValue(wasm: WasmModule, name: string): unknown {
+  const bytes = wasm.export_variable(name, "json", 64 * 1024 * 1024);
+  return JSON.parse(new TextDecoder().decode(bytes));
+}
+
+function hydrateStandardScope(wasm: WasmModule, names?: Iterable<string>) {
+  const requested = names ?? (JSON.parse(wasm.list_variables()) as Array<{ name?: string }>).flatMap(item => item.name ? [item.name] : []);
+  for (const name of requested) {
+    try { standardJavaScriptScope[name] = exportedJavaScriptValue(wasm, name); }
+    catch { /* Functions and opaque runtime objects remain available only through bl. */ }
+  }
+}
+
+function displayJavaScriptValue(value: unknown): string {
+  if (value === undefined) return "undefined";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean" || value === null) return String(value);
+  try { return JSON.stringify(value, null, 2); }
+  catch { return String(value); }
+}
+
+async function executeStandardJavaScript(wasm: WasmModule, source: string): Promise<ExecutionResult> {
+  const started = performance.now();
+  const prepared = prepareStandardJavaScript(source);
+  if (!prepared.ok) return {
+    ok: false, error: prepared.issues.map(item => item.message).join("\n"), output: "",
+    elapsedMs: Math.round((performance.now() - started) * 10) / 10, backend: "browser",
+  };
+  hydrateStandardScope(wasm);
+  const bl = await loadStandardSession(wasm);
+  const sdk = await loadJavaScriptSdk();
+  const output: string[] = [];
+  const render = (values: unknown[]) => values.map(displayJavaScriptValue).join(" ");
+  const consoleBridge = {
+    log: (...values: unknown[]) => output.push(render(values)),
+    info: (...values: unknown[]) => output.push(render(values)),
+    warn: (...values: unknown[]) => output.push(`Warning: ${render(values)}`),
+    error: (...values: unknown[]) => output.push(`Error: ${render(values)}`),
+  };
+  try {
+    const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as new (...args: string[]) => (...values: unknown[]) => Promise<unknown>;
+    const run = new AsyncFunction("__scope", "bl", "bio", "console", prepared.executable);
+    const value = await run(standardJavaScriptScope, bl, sdk, consoleBridge);
+    const packageResult = value && typeof value === "object" && "ok" in value && ("value" in value || "error" in value)
+      ? value as ExecutionResult : null;
+    if (packageResult) {
+      return {
+        ...packageResult, output: [...output, packageResult.output ?? ""].filter(Boolean).join("\n"),
+        compiledSource: source, elapsedMs: Math.round((performance.now() - started) * 10) / 10, backend: "browser",
+      };
+    }
+    return {
+      ok: true, value: displayJavaScriptValue(value), type: Array.isArray(value) ? "List" : value === null ? "Nil" : typeof value,
+      output: output.join("\n"), compiledSource: source,
+      elapsedMs: Math.round((performance.now() - started) * 10) / 10, backend: "browser",
+    };
+  } catch (error) {
+    return {
+      ok: false, error: error instanceof Error ? error.message : String(error), output: output.join("\n"), compiledSource: source,
+      elapsedMs: Math.round((performance.now() - started) * 10) / 10, backend: "browser",
+    };
+  }
 }
 
 function attach(file: AttachedFile) {
@@ -87,9 +175,7 @@ async function handle(request: WorkerRequest): Promise<unknown> {
       const bio = await loadJavaScriptSdk();
       const exactGenerated = generated.source === request.javascriptSource;
       const directSource = generated.source.startsWith("// Direct JavaScript API;");
-      if (!exactGenerated && !directSource) throw new Error("This generated JavaScript cell is read-only because it needs the structural frontend. Edit its BioLang source instead.");
-      const safe = directSource ? compileSafeJavaScript(request.javascriptSource, javascriptVariables.keys()) : null;
-      if (safe && !safe.ok) throw new Error(safe.issues.map(item => item.message).join("\n"));
+      const safe = compileSafeJavaScript(request.javascriptSource, javascriptVariables.keys());
       if (safe?.ok) {
         const result = JSON.parse(wasm.evaluate(safe.biolangSource)) as ExecutionResult;
         result.compiledSource = safe.biolangSource;
@@ -98,9 +184,11 @@ async function handle(request: WorkerRequest): Promise<unknown> {
         if (result.ok) {
           const bio = await loadJavaScriptSdk();
           for (const name of safe.bindingNames) javascriptVariables.set(name, (bio.ref as (name: string) => unknown)(name));
+          hydrateStandardScope(wasm, safe.bindingNames);
         }
         return result;
       }
+      if (!exactGenerated || directSource) return executeStandardJavaScript(wasm, request.javascriptSource);
       const priorBindings = [...javascriptVariables.entries()];
       const executable = request.javascriptSource.replace(/\nresult;\s*$/, "\nreturn result;");
       const run = new Function(
@@ -144,8 +232,12 @@ async function handle(request: WorkerRequest): Promise<unknown> {
     }
     case "compileJavaScript": {
       const safe = compileSafeJavaScript(request.javascriptSource, request.priorNames);
-      if (!safe.ok) throw new Error(safe.issues.map(item => item.message).join("\n"));
-      return safe.biolangSource;
+      if (!safe.ok) {
+        const standard = prepareStandardJavaScript(request.javascriptSource);
+        if (!standard.ok) throw new Error(standard.issues.map(item => item.message).join("\n"));
+        return { syncable: false, reason: "This cell uses ordinary JavaScript and remains JavaScript-owned." };
+      }
+      return { syncable: true, biolangSource: safe.biolangSource };
     }
     case "transpileJavaScript": {
       const result = JSON.parse(wasm.transpile_javascript(request.source)) as { ok: boolean; source?: string; error?: string };
@@ -159,6 +251,8 @@ async function handle(request: WorkerRequest): Promise<unknown> {
     case "reset":
       wasm.reset();
       javascriptVariables.clear();
+      for (const name of Object.keys(standardJavaScriptScope)) delete standardJavaScriptScope[name];
+      standardSession = null;
       return null;
     case "clearFiles":
       files.clear();

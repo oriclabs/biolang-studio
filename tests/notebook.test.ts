@@ -22,6 +22,13 @@ describe("BioLang notebook format", () => {
     expect(cells[0].javascriptSource).toContain("await bl.mean");
     expect(serializeNotebook(cells)).toBe(source);
   });
+  it("round trips an automatically separated standard JavaScript cell", () => {
+    const source = "```javascript+standard\nconsole.log(Math.sqrt(9));\n```\n\n```biolang\nnil\n```\n";
+    const cells = parseNotebook(source);
+    expect(cells[0].javascriptIndependent).toBe(true);
+    expect(cells[0].javascriptSource).toContain("console.log");
+    expect(serializeNotebook(cells)).toBe(source);
+  });
   it("keeps directives out of executable source", () => {
     expect(directives("# @skip\n1 + 1").skip).toBe(true);
     expect(executableSource("# @hide-output\n1 + 1")).toBe("1 + 1");

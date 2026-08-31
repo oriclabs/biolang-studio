@@ -35,7 +35,7 @@ test("shows every existing lesson cell as paired BioLang and JavaScript", async 
   await expect(page.locator(".status")).toHaveText("ready", { timeout: 30_000 });
   await page.getByRole("button", { name: /Run all · JS/ }).click();
   await expect(page.locator("article.cell-code").nth(1).locator(".result")).toContainText("15", { timeout: 30_000 });
-  await expect(page.getByText(/using JavaScript compiled to BioLang/)).toBeVisible();
+  await expect(page.getByText(/using JavaScript with BioLang WASM/)).toBeVisible();
 
   await firstCell.getByRole("tab", { name: "BioLang" }).click();
   await expect(page.getByLabel("Notebook code language")).toHaveValue("biolang");
@@ -84,6 +84,40 @@ test("opens a newly inserted JavaScript cell as an editable direct cell", async 
   await editor.fill("let value = await bl.mean([2, 4, 6]);\nvalue;");
   await cell.getByRole("tab", { name: "BioLang" }).click();
   await expect(cell.getByLabel(/BioLang cell/)).toContainText("let value = mean([2, 4, 6])", { timeout: 5_000 });
+});
+
+test("runs ordinary JavaScript and BioLang package calls in the same JavaScript mode", async ({ page }) => {
+  test.setTimeout(60_000);
+  await page.goto("/?lang=js");
+  await expect(page.locator(".status")).toHaveText("ready", { timeout: 30_000 });
+  await page.getByRole("button", { name: "New", exact: true }).click();
+  await page.getByRole("button", { name: "+ Code" }).click();
+  await page.getByRole("button", { name: "+ Code" }).click();
+  const cells = page.locator("article.cell-code");
+  await expect(cells).toHaveCount(2);
+
+  await cells.nth(0).getByLabel(/JavaScript equivalent/).fill(`const values = [1, 2, 3, 4].map(value => value * 2);
+function total(items) {
+  let sum = 0;
+  for (const value of items) sum += value;
+  return sum;
+}
+const report = await bl.mean(values);
+console.log("BioLang mean", report.value);
+({ total: total(values), mean: report.value });`);
+  await expect(cells.nth(0).getByText("JavaScript + bl package · BioLang calls use WASM")).toBeVisible({ timeout: 5_000 });
+  await cells.nth(1).getByLabel(/JavaScript equivalent/).fill(`console.log("reused values", values.length);
+Math.max(...values);`);
+  await expect(cells.nth(1).getByText("JavaScript + bl package · BioLang calls use WASM")).toBeVisible({ timeout: 5_000 });
+
+  await cells.nth(1).getByRole("button", { name: /Run cell/ }).click();
+  await expect(cells.nth(0).locator(".result")).toContainText("BioLang mean 5", { timeout: 30_000 });
+  await expect(cells.nth(0).locator(".result")).toContainText('"total": 20');
+  await expect(cells.nth(1).locator(".result")).toContainText("reused values 4");
+  await expect(cells.nth(1).locator(".result")).toContainText("8");
+
+  await cells.nth(0).getByRole("tab", { name: "BioLang" }).click();
+  await expect(cells.nth(0).getByLabel(/BioLang cell/)).toContainText("# BioLang code");
 });
 
 test("creates an editable task-first statistics notebook", async ({ page }) => {

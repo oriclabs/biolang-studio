@@ -6,7 +6,7 @@ import { linter, lintGutter, type Diagnostic } from "@codemirror/lint";
 import { Compartment, EditorState } from "@codemirror/state";
 import { EditorView, keymap, lineNumbers, placeholder as editorPlaceholder } from "@codemirror/view";
 import type { LanguageCompletion, LanguageDiagnostic } from "./kernel/protocol";
-import { compileSafeJavaScript } from "./notebook/javascript";
+import { diagnoseStandardJavaScript } from "./notebook/standard-javascript";
 
 type Props = {
   label: string;
@@ -22,8 +22,8 @@ type Props = {
 };
 
 function jsDiagnostics(source: string, knownNames: string[]): Diagnostic[] {
-  const result = compileSafeJavaScript(source, knownNames);
-  return result.ok ? [] : result.issues.map(item => ({
+  void knownNames;
+  return diagnoseStandardJavaScript(source).map(item => ({
     from: Math.min(item.start, source.length),
     to: Math.min(Math.max(item.end, item.start + 1), source.length),
     severity: "error",

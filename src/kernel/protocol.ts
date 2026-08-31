@@ -125,6 +125,12 @@ export interface LanguageCompletion {
   insertText: string;
 }
 
+export interface JavaScriptCompilation {
+  syncable: boolean;
+  biolangSource?: string;
+  reason?: string;
+}
+
 export interface AttachedFile {
   path: string;
   contents: string;
@@ -137,7 +143,7 @@ export interface Kernel {
   initialize(): Promise<KernelCapabilities>;
   execute(source: string): Promise<ExecutionResult>;
   executeJavaScript?(javascriptSource: string, biolangSource: string): Promise<ExecutionResult>;
-  compileJavaScript?(javascriptSource: string, priorNames: string[]): Promise<string>;
+  compileJavaScript?(javascriptSource: string, priorNames: string[]): Promise<JavaScriptCompilation>;
   transpileJavaScript?(source: string): Promise<string>;
   diagnostics?(source: string): Promise<LanguageDiagnostic[]>;
   completions?(prefix?: string): Promise<LanguageCompletion[]>;
