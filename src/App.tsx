@@ -13,6 +13,7 @@ import { SomerKernel } from "./kernel/somer-client";
 import { WasmKernel } from "./kernel/wasm-client";
 import { forgetRecentNativeDocument, nativeDocumentStatus, nativeDocumentsAvailable, openNativeDocument, readRecentNativeDocuments, rememberNativeDocument, saveNativeDocument, type NativeDocumentBinding, type NativeDocumentKind, type RecentNativeDocument } from "./kernel/native-documents";
 import { directives, executableSource, expandMixedMarkdown, parseNotebook, serializeNotebook, type NotebookCell } from "./notebook/format";
+import { javascriptEmbedding, readNotebookCodeLanguage, saveNotebookCodeLanguage, type NotebookCodeLanguage } from "./notebook/language";
 import { cacheAttachment, clearContentCache, hasDataset, loadAttachment, loadWorkspaceSession, prepareDataset, prepareRemoteAttachment, removeDataset, requestPersistentStorage, saveWorkspaceSession, sha256, storageStatus, type StorageStatus } from "./storage/content-store";
 import { RegistryWorkspace, type RegistryViewState } from "./registry/RegistryWorkspace";
 import { assertUnambiguousMountPaths, attachmentId, isSafeWorkspacePath, migratePortableWorkspace, WORKSPACE_SCHEMA_URL, type PortableWorkspace, type WorkspaceAttachment } from "./workspace/format";
@@ -320,6 +321,7 @@ export default function App() {
   const [kernelKind, setKernelKind] = useState<KernelKind>("browser");
   const [kernelState, setKernelState] = useState("starting");
   const [colorTheme, setColorTheme] = useState<StudioTheme>(readStudioTheme);
+  const [codeLanguage, setCodeLanguage] = useState<NotebookCodeLanguage>(readNotebookCodeLanguage);
   const [kernelEpoch, setKernelEpoch] = useState(0);
   const [running, setRunning] = useState(false);
   const [notice, setNoticeState] = useState<Notice>(INITIAL_NOTICE);
@@ -425,6 +427,8 @@ export default function App() {
     if (colorTheme === "system") preference.addEventListener("change", syncTheme);
     return () => preference.removeEventListener("change", syncTheme);
   }, [colorTheme]);
+
+  useEffect(() => saveNotebookCodeLanguage(codeLanguage), [codeLanguage]);
 
   useEffect(() => {
     let active = true;
@@ -1843,10 +1847,13 @@ export default function App() {
     if (cell.type === "code") { needsResetRef.current = true; setValidThrough(current => Math.min(current, index - 1)); }
   }
 
-  async function copyCodeCell(cell: Cell, index: number) {
+  async function copyCodeCell(cell: Cell, index: number, language: NotebookCodeLanguage) {
+    const source = language === "javascript"
+      ? javascriptEmbedding(executableSource(cell.source))
+      : cell.source;
     try {
-      await navigator.clipboard.writeText(cell.source);
-      setNotice({ tone: "good", text: `Copied BioLang code from cell ${index + 1}.` });
+      await navigator.clipboard.writeText(source);
+      setNotice({ tone: "good", text: `Copied ${language === "javascript" ? "JavaScript" : "BioLang"} code from cell ${index + 1}.` });
     } catch {
       setNotice({ tone: "bad", text: "The browser did not allow clipboard access. Select the code and copy it manually." });
     }
@@ -1891,11 +1898,14 @@ export default function App() {
       : cell.status === "running" ? { glyph: "◌", label: "Running", state: "Running" }
       : cell.status === "skipped" ? { glyph: "↻", label: "Run again", state: "Skipped" }
       : { glyph: "▶", label: "Run", state: "Not run" };
+    const displayedSource = cell.type === "code" && codeLanguage === "javascript"
+      ? javascriptEmbedding(executableSource(cell.source))
+      : cell.source;
     return <article className={`cell cell-${cell.type} ${cell.status ?? ""}`} data-cell-index={index} key={cell.id}>
       <div className="cell-rail">{cell.type === "code" ? <><button aria-label={`${runAction.label} cell ${index + 1}`} title={cell.status === "done" ? "Run again from a clean interpreter; earlier cells will replay" : `${runAction.label}; required earlier cells run automatically`} disabled={running || kernelState !== "ready"} onClick={() => void runTo(index)}>{runAction.glyph}</button><small>{index + 1}</small><em>{runAction.state}</em></> : <><span>¶</span><small>{index + 1}</small></>}</div>
       <div className="cell-body">
-        {cell.type === "code" && <button className="cell-copy-action" aria-label={`Copy code from cell ${index + 1}`} title="Copy this BioLang code" disabled={!cell.source} onClick={() => void copyCodeCell(cell, index)}>Copy</button>}
-        {cell.type === "markdown" && !cell.editing ? <><button className="markdown-edit-action" onClick={() => editMarkdown(index)}>Edit</button><MarkdownView source={cell.source} index={index} edit={editMarkdown}/></> : <AutoGrowTextarea label={`${cell.type} cell ${index + 1}`} className={cell.type === "code" ? "code-editor" : "markdown-editor"} value={cell.source} spellCheck={cell.type === "markdown"} change={source => updateCell(index, { source })} blur={() => cell.type === "markdown" && finishMarkdownCell(index)} run={cell.type === "code" ? advance => {
+        {cell.type === "code" && <><div className="code-language-tabs" role="tablist" aria-label={`Cell ${index + 1} language`}><button role="tab" aria-selected={codeLanguage === "biolang"} className={codeLanguage === "biolang" ? "active" : ""} onClick={() => setCodeLanguage("biolang")}>BioLang</button><button role="tab" aria-selected={codeLanguage === "javascript"} className={codeLanguage === "javascript" ? "active" : ""} onClick={() => setCodeLanguage("javascript")}>JavaScript</button><span>{codeLanguage === "javascript" ? "Generated · same BioLang kernel" : "Canonical lesson source"}</span></div><button className="cell-copy-action" aria-label={`Copy ${codeLanguage === "javascript" ? "JavaScript" : "BioLang"} code from cell ${index + 1}`} title={`Copy this ${codeLanguage === "javascript" ? "JavaScript embedding" : "BioLang code"}`} disabled={!displayedSource} onClick={() => void copyCodeCell(cell, index, codeLanguage)}>Copy</button></>}
+        {cell.type === "code" && codeLanguage === "javascript" ? <pre className="javascript-code-preview" aria-label={`JavaScript equivalent for cell ${index + 1}`}><code>{displayedSource}</code></pre> : cell.type === "markdown" && !cell.editing ? <><button className="markdown-edit-action" onClick={() => editMarkdown(index)}>Edit</button><MarkdownView source={cell.source} index={index} edit={editMarkdown}/></> : <AutoGrowTextarea label={`${cell.type} cell ${index + 1}`} className={cell.type === "code" ? "code-editor" : "markdown-editor"} value={cell.source} spellCheck={cell.type === "markdown"} change={source => updateCell(index, { source })} blur={() => cell.type === "markdown" && finishMarkdownCell(index)} run={cell.type === "code" ? advance => {
           void runTo(index);
           if (advance) requestAnimationFrame(() => [...document.querySelectorAll<HTMLTextAreaElement>("article.cell-code textarea")].find(editor => Number(editor.closest("article")?.dataset.cellIndex) > index)?.focus());
         } : undefined}/>}

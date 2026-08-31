@@ -60,6 +60,37 @@
 .cell-code .code-editor { padding-right: 48px; }
 .cell-markdown .prose { padding-right: 38px; }
 
+.code-language-tabs {
+  min-height: 29px;
+  margin: -5px 42px 8px 0;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-bottom: 1px solid var(--bl-border);
+}
+.code-language-tabs button {
+  align-self: stretch;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  padding: 4px 8px 3px;
+  background: transparent;
+  color: var(--bl-dim);
+  font-size: 10px;
+  font-weight: 650;
+}
+.code-language-tabs button:hover,
+.code-language-tabs button:focus-visible { color: var(--bl-accent); }
+.code-language-tabs button.active { border-bottom-color: var(--bl-accent); color: var(--bl-accent); }
+.code-language-tabs span { margin-left: auto; color: var(--bl-muted); font-size: 9px; }
+.javascript-code-preview {
+  min-height: 90px;
+  margin: 0;
+  overflow: auto;
+  color: var(--bl-text);
+  font: 13px/1.6 "Cascadia Code", Consolas, monospace;
+  white-space: pre;
+}
+
 .variables-section { padding-top: 0 !important; }
 .variables-disclosure summary {
   display: flex;

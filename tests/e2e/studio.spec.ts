@@ -20,6 +20,26 @@ test("switches and remembers the Studio color theme", async ({ page }) => {
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
 });
 
+test("shows every existing lesson cell as paired BioLang and JavaScript", async ({ page, context }) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await page.goto("/?lang=js");
+  const firstCell = page.locator("article.cell-code").first();
+  await expect(firstCell.getByRole("tab", { name: "JavaScript" })).toHaveAttribute("aria-selected", "true");
+  await expect(firstCell.getByLabel("JavaScript equivalent for cell 2")).toContainText("await bl.run(");
+  await expect(firstCell.getByLabel("JavaScript equivalent for cell 2")).toContainText("let measurements");
+  await firstCell.getByRole("button", { name: /Copy JavaScript code/ }).click();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toContain("await bl.run(");
+
+  await expect(page.locator(".status")).toHaveText("ready", { timeout: 30_000 });
+  await page.locator("article.cell-code").nth(1).getByRole("button", { name: /Run cell/ }).click();
+  await expect(page.locator("article.cell-code").nth(1).locator(".result")).toContainText("15", { timeout: 30_000 });
+
+  await firstCell.getByRole("tab", { name: "BioLang" }).click();
+  await expect(page.locator("textarea.code-editor").first()).toContainText("let measurements");
+  await page.goto("/");
+  await expect(page.locator("article.cell-code").first().getByRole("tab", { name: "BioLang" })).toHaveAttribute("aria-selected", "true");
+});
+
 test("creates an editable task-first statistics notebook", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Guided stats" }).click();

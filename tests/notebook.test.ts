@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { directives, executableSource, expandMixedMarkdown, parseNotebook, serializeNotebook, type NotebookCell } from "../src/notebook/format";
+import { javascriptEmbedding, readNotebookCodeLanguage, saveNotebookCodeLanguage } from "../src/notebook/language";
 import { lessonEntryForDocument, manifestLessonEntries, validateManifest } from "../src/content/manifest";
 import { lessonUpdateAvailable } from "../src/content/installed";
 import { manifestLessonShareUrl, parseLessonLaunchUrl, registryLessonShareUrl, removeLessonLaunchParams } from "../src/content/lesson-links";
@@ -30,6 +31,29 @@ describe("BioLang notebook format", () => {
     expect(expandMixedMarkdown(mixed).map(cell => cell.type)).toEqual(["markdown", "code", "markdown"]);
     const inline = { ...mixed, source: "Explain `mean(x)` without running it." };
     expect(expandMixedMarkdown(inline)).toEqual([inline]);
+  });
+});
+
+describe("paired JavaScript lesson view", () => {
+  it("creates runnable JavaScript which preserves the exact BioLang source", async () => {
+    const source = "let label = `sample`\nlet escaped = \\\"${value}\\\"\nmean([1, 2, 3])";
+    const generated = javascriptEmbedding(source);
+    expect(generated).toContain("await bl.run(");
+    expect(generated).toContain("\\`sample\\`");
+    expect(generated).toContain("\\${value}");
+    expect(generated).toContain("mean([1, 2, 3])");
+    let observed = "";
+    const execute = new Function("bl", `return (async () => { ${generated} })()`);
+    await execute({ run(value: string) { observed = value; return { ok: true }; } });
+    expect(observed).toBe(source);
+  });
+  it("uses URL language overrides and otherwise remembers the reader preference", () => {
+    const values = new Map<string, string>();
+    const storage = { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => { values.set(key, value); } };
+    saveNotebookCodeLanguage("javascript", storage);
+    expect(readNotebookCodeLanguage("https://studio.lang.bio/", storage)).toBe("javascript");
+    expect(readNotebookCodeLanguage("https://studio.lang.bio/?lang=bl", storage)).toBe("biolang");
+    expect(readNotebookCodeLanguage("https://studio.lang.bio/?lang=js", null)).toBe("javascript");
   });
 });
 

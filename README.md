@@ -8,7 +8,7 @@ It is deliberately separate from `bl.exe`: the CLI stays small and scriptable, w
 
 ## Current capabilities
 
-- live `.bln` editing with markdown and BioLang cells, plus optional collapsible lesson steps;
+- live `.bln` editing with markdown and BioLang cells, paired JavaScript embedding tabs, plus optional collapsible lesson steps;
 - a schema-driven **Guided stats** notebook creator that starts from the scientific question, requires named input columns, and writes the selected method into editable BioLang;
 - multiple notebook tabs with isolated variables, plus compact one-tab navigation for multi-section lesson collections;
 - persistent browser interpreter with automatic prerequisite execution;
@@ -162,7 +162,7 @@ Explain the result.
 <!-- /bl:step -->
 ````
 
-When writing an explanation cell, only explicit fenced `biolang` or `bl` blocks become executable; inline backticks remain prose. Every executable code cell has a visible **Copy** action that copies exactly the displayed BioLang source and confirms success without running it. The Variables inspector is collapsed by default and shows its current item count, leaving the sidebar focused on lessons and data.
+When writing an explanation cell, only explicit fenced `biolang` or `bl` blocks become executable; inline backticks remain prose. Every existing code cell has **BioLang** and **JavaScript** tabs. BioLang remains the canonical editable lesson source; the JavaScript tab generates complete `await bl.run(...)` session code and makes explicit that the same BioLang kernel performs the scientific work. The selected tab is remembered, and `?lang=js` or `?lang=bl` can choose the initial view in a shared link. **Copy** copies the currently displayed language without running it. Run always uses the canonical cell, so changing the presentation tab cannot change a lesson result or invalidate its verified manifest checksum. The Variables inspector is collapsed by default and shows its current item count, leaving the sidebar focused on lessons and data.
 
 The Variables menu exports the selected value rather than its shortened inspector preview. Browser exports are capped before an extra byte is written beyond the 10 MB result limit; larger values should use `:export variable result.json` (or `.csv`, `.tsv`, or `.txt`) in native BioLang, which serializes incrementally to an atomic temporary file. Sparse matrices default to JSON so an export does not accidentally densify them.
 
