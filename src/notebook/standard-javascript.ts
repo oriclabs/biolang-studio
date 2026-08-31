@@ -6,6 +6,15 @@ export type StandardJavaScript =
   | { ok: true; executable: string; declared: string[] }
   | { ok: false; issues: JavaScriptIssue[] };
 
+type BioLangResultEnvelope = {
+  ok: boolean;
+  value?: unknown;
+  type?: unknown;
+  error?: unknown;
+  structured?: unknown;
+  results?: unknown[];
+};
+
 const BLOCKED_NAMES = new Set([
   "document", "eval", "fetch", "Function", "globalThis", "importScripts", "indexedDB",
   "location", "navigator", "self", "WebSocket", "window", "Worker", "XMLHttpRequest",
@@ -97,4 +106,52 @@ export function prepareStandardJavaScript(source: string): StandardJavaScript {
 export function diagnoseStandardJavaScript(source: string): JavaScriptIssue[] {
   const prepared = prepareStandardJavaScript(source);
   return prepared.ok ? [] : prepared.issues;
+}
+
+function isBioLangResultEnvelope(value: unknown): value is BioLangResultEnvelope {
+  return Boolean(value && typeof value === "object" && typeof (value as { ok?: unknown }).ok === "boolean" &&
+    ("value" in value || "error" in value || "structured" in value || "results" in value));
+}
+
+function structuredValue(value: unknown): unknown {
+  if (!value || typeof value !== "object") return value;
+  const item = value as { value?: unknown; columns?: unknown; rows?: unknown };
+  if (Array.isArray(item.columns) && Array.isArray(item.rows)) {
+    const columns = item.columns as unknown[];
+    return item.rows.map(row => Object.fromEntries(columns.map((column, index) => [String(column), Array.isArray(row) ? row[index] : undefined])));
+  }
+  return "value" in item ? item.value : value;
+}
+
+function scalarBioLangValue(value: unknown, type: unknown): unknown {
+  if (value === null || value === undefined || type === "Nil") return null;
+  if (typeof value !== "string") return value;
+  const normalizedType = String(type ?? "").toLowerCase();
+  if (normalizedType === "str" || normalizedType === "string") return value;
+  if (["int", "integer", "float", "number"].includes(normalizedType)) {
+    const number = Number(value);
+    if (Number.isFinite(number)) return number;
+  }
+  if (["bool", "boolean"].includes(normalizedType)) return value.toLowerCase() === "true";
+  try { return JSON.parse(value); }
+  catch { return value; }
+}
+
+/** Turn nested `bl.*` run envelopes into values suitable for a JS object/table. */
+export function normalizeStandardJavaScriptOutput(value: unknown): unknown {
+  if (isBioLangResultEnvelope(value)) {
+    if (!value.ok) throw new Error(String(value.error ?? "BioLang computation failed."));
+    const result = value.results?.length === 1 ? value.results[0]
+      : value.results?.length ? value.results
+        : value.structured ?? value.value;
+    return normalizeStandardJavaScriptOutput(result === value.value ? scalarBioLangValue(result, value.type) : structuredValue(result));
+  }
+  if (Array.isArray(value)) return value.map(normalizeStandardJavaScriptOutput);
+  if (value && typeof value === "object") {
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype === Object.prototype || prototype === null) {
+      return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, normalizeStandardJavaScriptOutput(item)]));
+    }
+  }
+  return value;
 }

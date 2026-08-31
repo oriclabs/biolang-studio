@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { prepareStandardJavaScript } from "./standard-javascript";
+import { normalizeStandardJavaScriptOutput, prepareStandardJavaScript } from "./standard-javascript";
 
 describe("standard JavaScript notebook cells", () => {
   it("accepts ordinary JavaScript and persists top-level names", () => {
@@ -19,5 +19,16 @@ describe("standard JavaScript notebook cells", () => {
 
   it.each(["fetch('/secret')", "globalThis.location", "import('./module.js')", "({}).constructor", "this.window", "({ window })"])('blocks unavailable capability: %s', source => {
     expect(prepareStandardJavaScript(source).ok).toBe(false);
+  });
+
+  it("turns nested BioLang results into a tabular JavaScript record", () => {
+    expect(normalizeStandardJavaScriptOutput({
+      mean: { ok: true, value: "17.5", type: "Float", output: "" },
+      median: { ok: true, value: "15", type: "Int", output: "" },
+    })).toEqual({ mean: 17.5, median: 15 });
+  });
+
+  it("does not hide a failed BioLang call inside a successful JavaScript object", () => {
+    expect(() => normalizeStandardJavaScriptOutput({ result: { ok: false, error: "mean requires data" } })).toThrow("mean requires data");
   });
 });

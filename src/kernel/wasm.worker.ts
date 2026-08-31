@@ -1,6 +1,6 @@
 import type { AttachedFile, ExecutionResult, VariableExportFormat, WorkerRequest, WorkerResponse } from "./protocol";
 import { compileSafeJavaScript } from "../notebook/javascript";
-import { prepareStandardJavaScript } from "../notebook/standard-javascript";
+import { normalizeStandardJavaScriptOutput, prepareStandardJavaScript } from "../notebook/standard-javascript";
 
 type WasmModule = {
   default: (input?: unknown) => Promise<unknown>;
@@ -108,12 +108,12 @@ async function executeStandardJavaScript(wasm: WasmModule, source: string): Prom
   const bl = await loadStandardSession(wasm);
   const sdk = await loadJavaScriptSdk();
   const output: string[] = [];
-  const render = (values: unknown[]) => values.map(displayJavaScriptValue).join(" ");
+  const render = (values: unknown[]) => values.map(value => displayJavaScriptValue(normalizeStandardJavaScriptOutput(value))).join(" ");
   const consoleBridge = {
-    log: (...values: unknown[]) => output.push(render(values)),
-    info: (...values: unknown[]) => output.push(render(values)),
-    warn: (...values: unknown[]) => output.push(`Warning: ${render(values)}`),
-    error: (...values: unknown[]) => output.push(`Error: ${render(values)}`),
+    log: (...values: unknown[]) => { output.push(render(values)); },
+    info: (...values: unknown[]) => { output.push(render(values)); },
+    warn: (...values: unknown[]) => { output.push(`Warning: ${render(values)}`); },
+    error: (...values: unknown[]) => { output.push(`Error: ${render(values)}`); },
   };
   try {
     const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as new (...args: string[]) => (...values: unknown[]) => Promise<unknown>;
@@ -122,13 +122,20 @@ async function executeStandardJavaScript(wasm: WasmModule, source: string): Prom
     const packageResult = value && typeof value === "object" && "ok" in value && ("value" in value || "error" in value)
       ? value as ExecutionResult : null;
     if (packageResult) {
+      const structured = (packageResult as ExecutionResult & { structured?: unknown }).structured;
       return {
         ...packageResult, output: [...output, packageResult.output ?? ""].filter(Boolean).join("\n"),
+        ...(!packageResult.results?.length && structured ? { results: [structured as never] } : {}),
         compiledSource: source, elapsedMs: Math.round((performance.now() - started) * 10) / 10, backend: "browser",
       };
     }
+    const normalized = normalizeStandardJavaScriptOutput(value);
+    const structured = normalized !== null && typeof normalized === "object";
     return {
-      ok: true, value: displayJavaScriptValue(value), type: Array.isArray(value) ? "List" : value === null ? "Nil" : typeof value,
+      ok: true,
+      ...(structured ? { results: [{ kind: "javascript", value: normalized }] }
+        : normalized === undefined ? {} : { value: displayJavaScriptValue(normalized) }),
+      type: Array.isArray(normalized) ? "List" : normalized === null ? "Nil" : typeof normalized,
       output: output.join("\n"), compiledSource: source,
       elapsedMs: Math.round((performance.now() - started) * 10) / 10, backend: "browser",
     };

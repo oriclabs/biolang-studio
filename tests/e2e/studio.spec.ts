@@ -112,9 +112,16 @@ Math.max(...values);`);
 
   await cells.nth(1).getByRole("button", { name: /Run cell/ }).click();
   await expect(cells.nth(0).locator(".result")).toContainText("BioLang mean 5", { timeout: 30_000 });
-  await expect(cells.nth(0).locator(".result")).toContainText('"total": 20');
+  await expect(cells.nth(0).locator(".result").getByRole("button", { name: "Table" })).toHaveAttribute("aria-pressed", "true");
+  await expect(cells.nth(0).locator(".result").getByRole("row", { name: /total 20/ })).toBeVisible();
+  await expect(cells.nth(0).locator(".result").getByRole("row", { name: /mean 5/ })).toBeVisible();
   await expect(cells.nth(1).locator(".result")).toContainText("reused values 4");
   await expect(cells.nth(1).locator(".result")).toContainText("8");
+
+  await cells.nth(1).getByLabel(/JavaScript equivalent/).fill('console.log("console returns no result");');
+  await cells.nth(1).getByRole("button", { name: /Run again|Rerun/ }).click();
+  await expect(cells.nth(1).locator("pre.stdout")).toHaveText("console returns no result");
+  await expect(cells.nth(1).locator(".result > pre:not(.stdout)")).toHaveCount(0);
 
   await cells.nth(0).getByRole("tab", { name: "BioLang" }).click();
   await expect(cells.nth(0).getByLabel(/BioLang cell/)).toContainText("# BioLang code");
