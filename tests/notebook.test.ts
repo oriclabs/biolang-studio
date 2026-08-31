@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { directives, executableSource, expandMixedMarkdown, parseNotebook, serializeNotebook, type NotebookCell } from "../src/notebook/format";
-import { javascriptEmbedding, readNotebookCodeLanguage, saveNotebookCodeLanguage } from "../src/notebook/language";
+import { compileNotebookCode, javascriptEmbedding, readNotebookCodeLanguage, saveNotebookCodeLanguage } from "../src/notebook/language";
 import { lessonEntryForDocument, manifestLessonEntries, validateManifest } from "../src/content/manifest";
 import { lessonUpdateAvailable } from "../src/content/installed";
 import { manifestLessonShareUrl, parseLessonLaunchUrl, registryLessonShareUrl, removeLessonLaunchParams } from "../src/content/lesson-links";
@@ -54,6 +54,14 @@ describe("paired JavaScript lesson view", () => {
     expect(readNotebookCodeLanguage("https://studio.lang.bio/", storage)).toBe("javascript");
     expect(readNotebookCodeLanguage("https://studio.lang.bio/?lang=bl", storage)).toBe("biolang");
     expect(readNotebookCodeLanguage("https://studio.lang.bio/?lang=js", null)).toBe("javascript");
+  });
+  it("compiles both frontends to the same canonical kernel source", () => {
+    const source = "let values = [1, 2, 3]\nmean(values)";
+    const biolang = compileNotebookCode(source, "biolang");
+    const javascript = compileNotebookCode(source, "javascript");
+    expect(biolang.frontendSource).toBe(source);
+    expect(javascript.frontendSource).toContain("await bl.run(");
+    expect(javascript.biolangSource).toBe(biolang.biolangSource);
   });
 });
 

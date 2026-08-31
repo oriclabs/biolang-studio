@@ -25,16 +25,19 @@ test("shows every existing lesson cell as paired BioLang and JavaScript", async 
   await page.goto("/?lang=js");
   const firstCell = page.locator("article.cell-code").first();
   await expect(firstCell.getByRole("tab", { name: "JavaScript" })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByLabel("Notebook code language")).toHaveValue("javascript");
   await expect(firstCell.getByLabel("JavaScript equivalent for cell 2")).toContainText("await bl.run(");
   await expect(firstCell.getByLabel("JavaScript equivalent for cell 2")).toContainText("let measurements");
   await firstCell.getByRole("button", { name: /Copy JavaScript code/ }).click();
   expect(await page.evaluate(() => navigator.clipboard.readText())).toContain("await bl.run(");
 
   await expect(page.locator(".status")).toHaveText("ready", { timeout: 30_000 });
-  await page.locator("article.cell-code").nth(1).getByRole("button", { name: /Run cell/ }).click();
+  await page.getByRole("button", { name: /Run all · JS/ }).click();
   await expect(page.locator("article.cell-code").nth(1).locator(".result")).toContainText("15", { timeout: 30_000 });
+  await expect(page.getByText(/using JavaScript compiled to BioLang/)).toBeVisible();
 
   await firstCell.getByRole("tab", { name: "BioLang" }).click();
+  await expect(page.getByLabel("Notebook code language")).toHaveValue("biolang");
   await expect(page.locator("textarea.code-editor").first()).toContainText("let measurements");
   await page.goto("/");
   await expect(page.locator("article.cell-code").first().getByRole("tab", { name: "BioLang" })).toHaveAttribute("aria-selected", "true");
@@ -223,7 +226,9 @@ test("exports a backend-disclosed, checksum-pinned run record", async ({ page })
   for await (const chunk of stream) chunks.push(Buffer.from(chunk));
   const record = JSON.parse(Buffer.concat(chunks).toString("utf8"));
   expect(record).toMatchObject({ schema: 1, kind: "biolang-studio-run", success: true, runtime: { runtime: "browser" } });
+  expect(record.notebook.sourceLanguage).toBe("biolang");
   expect(record.notebook.sourceSha256).toMatch(/^[0-9a-f]{64}$/);
+  expect(record.notebook.frontendSourceSha256).toMatch(/^[0-9a-f]{64}$/);
   expect(record.notebook.executedSourceSha256).toMatch(/^[0-9a-f]{64}$/);
 });
 

@@ -23,7 +23,9 @@
       "properties": {
         "id": { "type": "string", "minLength": 1 },
         "filename": { "type": "string", "minLength": 1 },
+        "sourceLanguage": { "enum": ["biolang", "javascript"] },
         "sourceSha256": { "$ref": "#/$defs/sha256" },
+        "frontendSourceSha256": { "$ref": "#/$defs/sha256" },
         "executedSourceSha256": { "$ref": "#/$defs/sha256" },
         "executedThrough": { "type": "integer", "minimum": 0 },
         "codeCells": { "type": "integer", "minimum": 0 }

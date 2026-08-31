@@ -13,7 +13,7 @@ import { SomerKernel } from "./kernel/somer-client";
 import { WasmKernel } from "./kernel/wasm-client";
 import { forgetRecentNativeDocument, nativeDocumentStatus, nativeDocumentsAvailable, openNativeDocument, readRecentNativeDocuments, rememberNativeDocument, saveNativeDocument, type NativeDocumentBinding, type NativeDocumentKind, type RecentNativeDocument } from "./kernel/native-documents";
 import { directives, executableSource, expandMixedMarkdown, parseNotebook, serializeNotebook, type NotebookCell } from "./notebook/format";
-import { javascriptEmbedding, readNotebookCodeLanguage, saveNotebookCodeLanguage, type NotebookCodeLanguage } from "./notebook/language";
+import { compileNotebookCode, javascriptEmbedding, readNotebookCodeLanguage, saveNotebookCodeLanguage, type NotebookCodeLanguage } from "./notebook/language";
 import { cacheAttachment, clearContentCache, hasDataset, loadAttachment, loadWorkspaceSession, prepareDataset, prepareRemoteAttachment, removeDataset, requestPersistentStorage, saveWorkspaceSession, sha256, storageStatus, type StorageStatus } from "./storage/content-store";
 import { RegistryWorkspace, type RegistryViewState } from "./registry/RegistryWorkspace";
 import { assertUnambiguousMountPaths, attachmentId, isSafeWorkspacePath, migratePortableWorkspace, WORKSPACE_SCHEMA_URL, type PortableWorkspace, type WorkspaceAttachment } from "./workspace/format";
@@ -43,7 +43,7 @@ type RunRecord = {
   finishedAt: string;
   success: boolean;
   workspace: { name: string };
-  notebook: { id: string; filename: string; sourceSha256: string; executedSourceSha256: string; executedThrough: number; codeCells: number };
+  notebook: { id: string; filename: string; sourceLanguage: NotebookCodeLanguage; sourceSha256: string; frontendSourceSha256: string; executedSourceSha256: string; executedThrough: number; codeCells: number };
   runtime: RuntimeInfo;
   inputs: Array<{ path: string; size: number; sha256: string; mediaType: string; sourceKind: WorkspaceAttachment["source"]["kind"] }>;
   timing: { elapsedMs: number };
@@ -892,8 +892,14 @@ export default function App() {
     const runStarted = performance.now();
     const runNotebookId = activeDocumentId;
     const runFilename = filename;
+    const runLanguage = codeLanguage;
     const runSource = serializeNotebook(cells);
-    const executedSource = cells.slice(0, end + 1).filter(cell => cell.type === "code" && !directives(cell.source).skip).map(cell => executableSource(cell.source)).filter(Boolean).join("\n\n");
+    const compiledCells = cells.slice(0, end + 1)
+      .filter(cell => cell.type === "code" && !directives(cell.source).skip)
+      .map(cell => compileNotebookCode(executableSource(cell.source), runLanguage))
+      .filter(compiled => Boolean(compiled.biolangSource));
+    const executedSource = compiledCells.map(compiled => compiled.biolangSource).join("\n\n");
+    const frontendSource = compiledCells.map(compiled => compiled.frontendSource).join("\n\n");
     const runInputs = visibleAttachments.filter(attachment => !missingAttachmentIds.has(attachment.id)).map(attachment => ({
       path: attachment.path, size: attachment.size, sha256: attachment.sha256,
       mediaType: attachment.mediaType, sourceKind: attachment.source.kind,
@@ -908,18 +914,18 @@ export default function App() {
         updateDocument(runNotebookId, document => ({ ...document, cells: document.cells.map(cell => cell.type === "code" && cell.result ? { ...cell, status: "stale" } : cell) }));
       }
       if (kernelKind === "somer") {
-        const runnable = cells.slice(0, end + 1).filter(cell => cell.type === "code" && !directives(cell.source).skip).map(cell => executableSource(cell.source)).filter(Boolean);
+        const runnable = compiledCells.map(compiled => compiled.biolangSource);
         const result = await kernelRef.current.execute(runnable.join("\n\n"));
         updateCell(end, { status: result.ok ? "done" : "error", result });
         if (!result.ok) { runError = result.error ?? "Remote execution failed."; setNotice({ tone: "bad", text: runError }); return; }
         runSucceeded = true;
-        setValidThrough(end); setNotice({ tone: "good", text: `SOMER ran ${runnable.length} code cells as one reproducible job.` }); return;
+        setValidThrough(end); setNotice({ tone: "good", text: `SOMER ran ${runnable.length} ${runLanguage === "javascript" ? "JavaScript → BioLang" : "BioLang"} code cells as one reproducible job.` }); return;
       }
       for (let index = start; index <= end; index++) {
         const cell = cells[index];
         if (!cell || cell.type !== "code") { setValidThrough(index); continue; }
         const instruction = directives(cell.source);
-        const source = executableSource(cell.source);
+        const source = compileNotebookCode(executableSource(cell.source), runLanguage).biolangSource;
         if (instruction.skip || !source) { updateCell(index, { status: "skipped", result: undefined }); setValidThrough(index); continue; }
         executingIndex = index;
         updateCell(index, { status: "running", result: undefined });
@@ -937,7 +943,7 @@ export default function App() {
       }
       await refreshVariables();
       runSucceeded = true;
-      setNotice({ tone: "good", text: `Finished through cell ${end + 1}. Earlier code cells were run when needed.` });
+      setNotice({ tone: "good", text: `Finished through cell ${end + 1} using ${runLanguage === "javascript" ? "JavaScript compiled to BioLang" : "BioLang"}. Earlier code cells were run when needed.` });
     } catch (error) {
       runError = stopRequestedRef.current ? "Cancelled by user" : error instanceof Error ? error.message : String(error);
       if (stopRequestedRef.current) updateDocument(runNotebookId, document => ({ ...document, cells: document.cells.map(cell => cell.status === "running" ? { ...cell, status: "stale" } : cell) }));
@@ -959,8 +965,8 @@ export default function App() {
         generatedAt: new Date().toISOString(), startedAt: runStartedAt.toISOString(), finishedAt: new Date().toISOString(),
         success: runSucceeded, workspace: { name: workspaceName.trim() || "BioLang workspace" },
         notebook: {
-          id: runNotebookId, filename: runFilename, sourceSha256: await sha256(runSource),
-          executedSourceSha256: await sha256(executedSource), executedThrough: end,
+          id: runNotebookId, filename: runFilename, sourceLanguage: runLanguage, sourceSha256: await sha256(runSource),
+          frontendSourceSha256: await sha256(frontendSource), executedSourceSha256: await sha256(executedSource), executedThrough: end,
           codeCells: cells.slice(0, end + 1).filter(cell => cell.type === "code" && !directives(cell.source).skip).length,
         },
         runtime, inputs: runInputs, timing: { elapsedMs: Math.round(performance.now() - runStarted) },
@@ -1932,10 +1938,11 @@ export default function App() {
       <nav className="toolbar">
         {workspaceView === "notebook" && <button onClick={() => setStatisticsGuideOpen(true)}>Guided stats</button>}
         {workspaceView === "notebook" ? <><button onClick={newNotebook}>New</button><button onClick={openFile}>Open</button><button onClick={saveFile}>Save</button><button onClick={() => setExportOpen(true)}>Export</button>{nativeDocumentsAvailable() && <button onClick={() => void saveDesktopNotebook(true)}>Save as…</button>}<details className="workspace-file-menu"><summary>Workspace{workspaceDirty ? " ●" : ""}</summary><div><button onClick={event => { openWorkspace(); event.currentTarget.closest("details")?.removeAttribute("open"); }}>Open .blw</button><button onClick={event => { saveWorkspaceFile(); event.currentTarget.closest("details")?.removeAttribute("open"); }}>{nativeDocumentsAvailable() ? "Save .blw" : "Export .blw"}</button>{nativeDocumentsAvailable() && <button onClick={event => { saveWorkspaceFile(true); event.currentTarget.closest("details")?.removeAttribute("open"); }}>Save .blw as…</button>}<button disabled={!activeDocument.lastRun} onClick={event => { saveRunRecord(); event.currentTarget.closest("details")?.removeAttribute("open"); }}>Export latest run record</button>{recentNativeDocuments.length > 0 && <div className="recent-native"><small>Recent Desktop files</small>{recentNativeDocuments.map(recent => <button key={recent.path} title={recent.path} onClick={event => { openRecentDocument(recent); event.currentTarget.closest("details")?.removeAttribute("open"); }}><span>{recent.filename}</span><em>{recent.kind}</em></button>)}</div>}</div></details>
-          <button className="primary" disabled={running || codeCount === 0 || kernelState !== "ready"} title={kernelState !== "ready" ? "BioLang is still starting" : undefined} onClick={() => pendingLessonData.length ? void prepareAndRunAll() : void runTo(cells.length - 1, true)}>▶ {pendingLessonData.length ? "Prepare & run all" : "Run all"}</button>
+          <button className="primary" disabled={running || codeCount === 0 || kernelState !== "ready"} title={kernelState !== "ready" ? "BioLang is still starting" : codeLanguage === "javascript" ? "Compile the displayed JavaScript frontend to BioLang and run it" : "Run the BioLang cells"} onClick={() => pendingLessonData.length ? void prepareAndRunAll() : void runTo(cells.length - 1, true)}>▶ {pendingLessonData.length ? "Prepare & run all" : "Run all"} · {codeLanguage === "javascript" ? "JS" : "BL"}</button>
           {running && <button onClick={() => void stopRun()}>Stop</button>}</> : <button onClick={() => void refreshRegistry()}>Refresh registry</button>}
       </nav>
       <div className="kernel-switch">
+        {workspaceView === "notebook" && <label>Code<select className="code-language-select" aria-label="Notebook code language" value={codeLanguage} disabled={running} onChange={event => setCodeLanguage(event.target.value as NotebookCodeLanguage)}><option value="biolang">BioLang</option><option value="javascript">JavaScript</option></select></label>}
         <label>Theme<select className="theme-select" aria-label="Color theme" value={colorTheme} onChange={event => setColorTheme(event.target.value as StudioTheme)}><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
         <label>Kernel<select aria-label="Kernel" value={kernelKind} disabled={running} onChange={event => {
           const next = event.target.value as KernelKind;
@@ -1981,7 +1988,7 @@ export default function App() {
           {activeRegistryLesson && <><div><dt>Licence</dt><dd>{activeRegistryLesson.licence}</dd></div><div><dt>Validation</dt><dd>{activeRegistryLesson.validation}</dd></div></>}
           <div><dt>Manifest SHA-256</dt><dd><code>{activeDocument.lessonManifestSha256 ?? activeInstalledLesson?.manifestSha256 ?? "Not recorded"}</code></dd></div>
           <div><dt>Declared data</dt><dd>{lesson.datasets.length ? `${lesson.datasets.length} checksum-pinned file${lesson.datasets.length === 1 ? "" : "s"}` : "None"}</dd></div>
-          <div><dt>Latest run</dt><dd>{activeDocument.lastRun ? `${activeDocument.lastRun.success ? "Successful" : "Failed"} · ${activeDocument.lastRun.runtime.runtime} · ${activeDocument.lastRun.finishedAt}` : "Not run in this workspace"}</dd></div>
+          <div><dt>Latest run</dt><dd>{activeDocument.lastRun ? `${activeDocument.lastRun.success ? "Successful" : "Failed"} · ${activeDocument.lastRun.notebook.sourceLanguage === "javascript" ? "JavaScript → BioLang" : "BioLang"} · ${activeDocument.lastRun.runtime.runtime} · ${activeDocument.lastRun.finishedAt}` : "Not run in this workspace"}</dd></div>
         </dl>{lesson.datasets.length > 0 && <details><summary>Dataset checksums</summary>{lesson.datasets.map(dataset => <code key={dataset.id}>{dataset.path} · {dataset.sha256}</code>)}</details>}</div></details>
         <details className="notebook-share"><summary>Share…</summary><div>{activeRegistryLesson && <button onClick={() => void copyCatalogueLink(activeRegistryLesson)}>Copy catalogue link</button>}<button onClick={() => void shareActiveLesson()}>Copy Studio link</button>{activeRegistryLesson && <button onClick={() => void copyChecksumLessonLink(activeRegistryLesson)}>Copy checksum link</button>}</div></details><button title="Replace edited cells and outputs with the lesson package version; prepared data is kept" onClick={() => void restoreOriginalLesson()}>Restore original</button>
       </div>}</div>

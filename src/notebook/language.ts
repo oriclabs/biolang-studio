@@ -41,3 +41,19 @@ export function javascriptEmbedding(source: string) {
     "result;",
   ].join("\n");
 }
+
+export type CompiledNotebookCode = {
+  language: NotebookCodeLanguage;
+  frontendSource: string;
+  biolangSource: string;
+};
+
+/** Compile the selected notebook frontend to the one kernel language. */
+export function compileNotebookCode(source: string, language: NotebookCodeLanguage): CompiledNotebookCode {
+  const biolangSource = String(source ?? "");
+  return {
+    language,
+    frontendSource: language === "javascript" ? javascriptEmbedding(biolangSource) : biolangSource,
+    biolangSource,
+  };
+}

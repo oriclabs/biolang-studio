@@ -90,6 +90,7 @@
   font: 13px/1.6 "Cascadia Code", Consolas, monospace;
   white-space: pre;
 }
+.kernel-switch .code-language-select { min-width: 105px; }
 
 .variables-section { padding-top: 0 !important; }
 .variables-disclosure summary {
