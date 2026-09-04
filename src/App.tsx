@@ -23,6 +23,11 @@ import { reportIssues, type NotebookReport, type ReportFormat, type ReportOption
 
 type Cell = NotebookCell & { result?: ExecutionResult; editing?: boolean };
 type Notice = { tone: "info" | "good" | "bad"; text: string } | null;
+const NOTICE_TIMEOUT_MS: Record<NonNullable<Notice>["tone"], number> = {
+  good: 5_000,
+  info: 8_000,
+  bad: 12_000,
+};
 const MARKDOWN_COMPONENTS: Components = {
   a: ({ href, children, ...props }) => {
     const external = /^https?:\/\//i.test(href ?? "");
@@ -236,6 +241,13 @@ export default function App() {
   const [kernelEpoch, setKernelEpoch] = useState(0);
   const [running, setRunning] = useState(false);
   const [notice, setNotice] = useState<Notice>({ tone: "info", text: "Run any code cell; required earlier cells run automatically." });
+  useEffect(() => {
+    if (!notice) return;
+    const timer = window.setTimeout(() => {
+      setNotice(current => current === notice ? null : current);
+    }, NOTICE_TIMEOUT_MS[notice.tone]);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
   const [variables, setVariables] = useState<VariableSummary[]>([]);
   const [variableRevision, setVariableRevision] = useState(0);
   const [collapsedSteps, setCollapsedSteps] = useState<Set<string>>(() => new Set());

@@ -9,6 +9,15 @@ test.beforeEach(async ({ page }) => {
   await page.route(REGISTRY_FALLBACK, route => route.fulfill({ json: { schema: 1, entries: [] } }));
 });
 
+test("automatically dismisses transient notices", async ({ page }) => {
+  await page.clock.install();
+  await page.goto("/");
+  const notice = page.getByText("Run any code cell; required earlier cells run automatically.");
+  await expect(notice).toBeVisible();
+  await page.clock.fastForward(8_000);
+  await expect(notice).toHaveCount(0);
+});
+
 test("creates an editable task-first statistics notebook", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Guided stats" }).click();
