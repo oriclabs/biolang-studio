@@ -1,8 +1,12 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { createHash } from "node:crypto";
 
-const REGISTRY = "https://registry.lang.bio/v1/index.json";
+const REGISTRY = "http://127.0.0.1:4178/__biolang/registry/v1/index.json";
 const REGISTRY_FALLBACK = "https://raw.githubusercontent.com/oriclabs/biolang-registry/main/registry/v1/index.json";
+
+async function enableExperimentalJavaScript(page: Page) {
+  await page.addInitScript(() => localStorage.setItem("biolang-studio:experimental-javascript-notebooks", "true"));
+}
 
 test.beforeEach(async ({ page }) => {
   await page.route(REGISTRY, route => route.fulfill({ json: { schema: 1, entries: [] } }));
@@ -29,32 +33,56 @@ test("switches and remembers the Studio color theme", async ({ page }) => {
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
 });
 
+test("shows only BioLang notebook controls by default", async ({ page }) => {
+  await page.goto("/?lang=js");
+  await expect(page.getByRole("group", { name: "Notebook code language" })).toHaveCount(0);
+  await expect(page.getByRole("tab", { name: "JavaScript" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /Run all BioLang/ })).toBeVisible();
+});
+
 test("shows every existing lesson cell as paired BioLang and JavaScript", async ({ page, context }) => {
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await enableExperimentalJavaScript(page);
   await page.goto("/?lang=js");
   const firstCell = page.locator("article.cell-code").first();
   await expect(firstCell.getByRole("tab", { name: "JavaScript" })).toHaveAttribute("aria-selected", "true");
-  await expect(page.getByLabel("Notebook code language")).toHaveValue("javascript");
+  await expect(page.getByRole("group", { name: "Notebook code language" }).getByRole("button", { name: "JavaScript" })).toHaveAttribute("aria-pressed", "true");
   await expect(firstCell.getByLabel("JavaScript equivalent for cell 2")).toContainText("let measurements = [12, 14, 15");
-  await expect(firstCell.getByLabel("JavaScript equivalent for cell 2")).toContainText("await bl.summary(measurements)");
+  await expect(firstCell.getByLabel("JavaScript equivalent for cell 2")).toContainText("bl.summary(measurements)");
   await expect(firstCell.getByLabel("JavaScript equivalent for cell 2")).not.toContainText("`let measurements");
   await firstCell.getByRole("button", { name: /Copy JavaScript code/ }).click();
-  expect(await page.evaluate(() => navigator.clipboard.readText())).toContain("await bl.summary(measurements)");
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toContain("bl.summary(measurements)");
 
   await expect(page.locator(".status")).toHaveText("ready", { timeout: 30_000 });
-  await page.getByRole("button", { name: /Run all · JS/ }).click();
+  await page.getByRole("button", { name: /Run all JavaScript/ }).click();
   await expect(page.locator("article.cell-code").nth(1).locator(".result")).toContainText("15", { timeout: 30_000 });
   await expect(page.getByText(/using JavaScript with BioLang WASM/)).toBeVisible();
 
   await firstCell.getByRole("tab", { name: "BioLang" }).click();
-  await expect(page.getByLabel("Notebook code language")).toHaveValue("biolang");
+  await expect(page.getByRole("group", { name: "Notebook code language" }).getByRole("button", { name: "BioLang" })).toHaveAttribute("aria-pressed", "true");
   await expect(page.locator(".codemirror-editor .cm-content").first()).toContainText("let measurements");
   await page.goto("/");
   await expect(page.locator("article.cell-code").first().getByRole("tab", { name: "BioLang" })).toHaveAttribute("aria-selected", "true");
 });
 
+test("keeps the selected code language with each notebook tab", async ({ page }) => {
+  await enableExperimentalJavaScript(page);
+  await page.goto("/?lang=bl");
+  await page.getByRole("button", { name: "New", exact: true }).click();
+  const language = page.getByRole("group", { name: "Notebook code language" });
+  await language.getByRole("button", { name: "JavaScript" }).click();
+  await expect(language.getByRole("button", { name: "JavaScript" })).toHaveAttribute("aria-pressed", "true");
+
+  const tabs = page.getByRole("tablist", { name: "Open notebooks" }).getByRole("tab");
+  await tabs.first().click();
+  await expect(language.getByRole("button", { name: "BioLang" })).toHaveAttribute("aria-pressed", "true");
+  await tabs.nth(1).click();
+  await expect(language.getByRole("button", { name: "JavaScript" })).toHaveAttribute("aria-pressed", "true");
+});
+
 test("edits the safe JavaScript frontend and reports unsupported JavaScript live", async ({ page }) => {
   test.setTimeout(60_000);
+  await enableExperimentalJavaScript(page);
   await page.goto("/?lang=js");
   await expect(page.locator(".status")).toHaveText("ready", { timeout: 30_000 });
   const cell = page.locator("article.cell-code").first();
@@ -81,6 +109,7 @@ test("edits the safe JavaScript frontend and reports unsupported JavaScript live
 });
 
 test("opens a newly inserted JavaScript cell as an editable direct cell", async ({ page }) => {
+  await enableExperimentalJavaScript(page);
   await page.goto("/?lang=js");
   await expect(page.locator(".status")).toHaveText("ready", { timeout: 30_000 });
   await page.getByRole("button", { name: "+ Code" }).click();
@@ -97,6 +126,7 @@ test("opens a newly inserted JavaScript cell as an editable direct cell", async 
 
 test("runs ordinary JavaScript and BioLang package calls in the same JavaScript mode", async ({ page }) => {
   test.setTimeout(60_000);
+  await enableExperimentalJavaScript(page);
   await page.goto("/?lang=js");
   await expect(page.locator(".status")).toHaveText("ready", { timeout: 30_000 });
   await page.getByRole("button", { name: "New", exact: true }).click();
@@ -657,8 +687,8 @@ test("opens a lesson collection as one tab with stateful selectable sections", a
       ],
     },
   }));
-  await page.route("https://lessons.example.test/biomedical/01-risk.bln", route => route.fulfill({ contentType: "text/plain", body: "# Risk\n\n```biolang\n1 + 1\n```\n" }));
-  await page.route("https://lessons.example.test/biomedical/02-trials.bln", route => route.fulfill({ contentType: "text/plain", body: "# Trials\n\n```biolang\n2 + 2\n```\n" }));
+  await page.route("https://lessons.example.test/biomedical/01-risk.bln", route => route.fulfill({ contentType: "text/plain", body: "# Risk\n\n```biolang\n1 + 1\n```\n\n[Next: Trials](#lesson-section=trials)\n" }));
+  await page.route("https://lessons.example.test/biomedical/02-trials.bln", route => route.fulfill({ contentType: "text/plain", body: "# Trials\n\n[Previous: Risk](#lesson-section=risk)\n\n```biolang\n2 + 2\n```\n" }));
   await page.route("https://lessons.example.test/biomedical/tiny.csv", route => route.fulfill({ contentType: "text/csv", body: "x,y\n1,2\n3,4\n" }));
   await page.goto("/");
   await page.getByRole("button", { name: "Add from manifest URL" }).click();
@@ -670,13 +700,24 @@ test("opens a lesson collection as one tab with stateful selectable sections", a
   await expect(page.getByText(/Biomedical series was added as one lesson with 2 selectable sections/)).toBeVisible();
   const sectionSelector = page.getByLabel("Lesson section", { exact: true });
   await expect(sectionSelector).toHaveValue("risk");
-  await page.getByRole("button", { name: "Prepare", exact: true }).click();
-  await expect(page.getByRole("button", { name: "Ready", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Prepare data", exact: true }).click();
+  await expect(page.getByText(/lesson file is prepared and attached/)).toBeVisible();
   await page.locator("article.cell-code").getByRole("button", { name: /Run cell/ }).click();
+  await expect(page.locator("article.cell-code .result")).toContainText("2");
+  await expect(page.getByRole("button", { name: "Next lesson section" })).toBeEnabled();
+  await page.getByRole("button", { name: "Next lesson section" }).click();
+  await expect(sectionSelector).toHaveValue("trials");
+  await page.getByRole("button", { name: "Previous lesson section" }).click();
+  await expect(sectionSelector).toHaveValue("risk");
+  await page.getByRole("link", { name: "Next: Trials" }).click();
+  await expect(sectionSelector).toHaveValue("trials");
+  await expect(page.getByRole("heading", { name: "Trials" })).toBeVisible();
+  await page.getByRole("link", { name: "Previous: Risk" }).click();
+  await expect(sectionSelector).toHaveValue("risk");
   await expect(page.locator("article.cell-code .result")).toContainText("2");
   await sectionSelector.selectOption("trials");
   await expect(page.getByRole("heading", { name: "Trials" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Ready", exact: true })).toBeVisible();
+  await expect(page.locator("article.cell-code").getByRole("button", { name: /Run cell/ })).toBeEnabled();
   await sectionSelector.selectOption("risk");
   await expect(page.locator("article.cell-code .result")).toContainText("2");
   await page.getByTitle("Remove Biomedical series").click();
@@ -716,6 +757,7 @@ test("discovers, verifies, runs, and removes a registry lesson", async ({ page }
   await page.goto("/");
   await page.getByRole("button", { name: "Registry", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Registry", exact: true })).toBeVisible();
+  await expect(page.getByText("local registry", { exact: true })).toBeVisible();
   const registryDetail = page.getByLabel("Registry entry details");
   await expect(registryDetail.getByRole("heading", { name: "Registry demo" })).toBeVisible();
   await expect(registryDetail.getByText("Available", { exact: true })).toBeVisible();
@@ -728,8 +770,8 @@ test("discovers, verifies, runs, and removes a registry lesson", async ({ page }
   await page.route(REGISTRY, route => route.abort());
   await page.unroute(REGISTRY_FALLBACK);
   await page.route(REGISTRY_FALLBACK, route => route.abort());
-  await page.reload();
-  await expect(page.getByText("offline cache")).toBeVisible();
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  await expect(page.getByText("offline cache", { exact: true })).toBeVisible();
   await expect(page.getByLabel("Registry entry details").getByRole("heading", { name: "Registry demo" })).toBeVisible();
   await page.getByRole("button", { name: "Install Registry demo" }).click();
   await expect(page.getByText(/checksum-verified and installed/)).toBeVisible();
@@ -745,8 +787,8 @@ test("discovers, verifies, runs, and removes a registry lesson", async ({ page }
   await expect(registryDetail.getByRole("button", { name: "Copy Studio link" })).toBeVisible();
   await expect(registryDetail.getByRole("button", { name: "Copy checksum link" })).toBeVisible();
   await page.getByRole("button", { name: "Notebook", exact: true }).click();
-  await page.getByRole("button", { name: "Prepare", exact: true }).click();
-  await expect(page.getByRole("button", { name: "Ready" })).toBeVisible();
+  await page.getByRole("button", { name: "Prepare data", exact: true }).click();
+  await expect(page.getByText(/lesson file is prepared and attached/)).toBeVisible();
   await page.locator("article.cell-code").getByRole("button", { name: /Run cell/ }).click();
   await expect(page.locator("article.cell-code .result")).toContainText("2");
   await page.getByTitle("Remove Registry demo").click();

@@ -2,7 +2,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { CatalogEntry, DatasetManifest, LessonManifest } from "./content/manifest";
-import { lessonEntryForDocument, manifestLessonEntries, validateManifest } from "./content/manifest";
+import { lessonEntryForDocument, lessonFetchOptions, manifestLessonEntries, validateManifest } from "./content/manifest";
 import { isLoopbackUrl } from "./content/url-policy";
 import { installLesson, installedLessons, lessonUpdateAvailable, uninstallLesson } from "./content/installed";
 import { manifestLessonShareUrl, parseLessonLaunchUrl, registryLessonShareUrl, removeLessonLaunchParams, type LessonLaunchRequest } from "./content/lesson-links";
@@ -13,7 +13,7 @@ import { SomerKernel } from "./kernel/somer-client";
 import { WasmKernel } from "./kernel/wasm-client";
 import { forgetRecentNativeDocument, nativeDocumentStatus, nativeDocumentsAvailable, openNativeDocument, readRecentNativeDocuments, rememberNativeDocument, saveNativeDocument, type NativeDocumentBinding, type NativeDocumentKind, type RecentNativeDocument } from "./kernel/native-documents";
 import { directives, executableSource, expandMixedMarkdown, parseNotebook, serializeNotebook, type NotebookCell } from "./notebook/format";
-import { compileNotebookCode, readNotebookCodeLanguage, saveNotebookCodeLanguage, type NotebookCodeLanguage } from "./notebook/language";
+import { compileNotebookCode, isLegacyGeneratedJavaScript, readExperimentalJavaScriptNotebooks, readNotebookCodeLanguage, readNotebookSourceLanguage, saveExperimentalJavaScriptNotebooks, saveNotebookCodeLanguage, withNotebookCodeLanguage, type NotebookCodeLanguage } from "./notebook/language";
 import { cacheAttachment, clearContentCache, hasDataset, loadAttachment, loadWorkspaceSession, prepareDataset, prepareRemoteAttachment, removeDataset, requestPersistentStorage, saveWorkspaceSession, sha256, storageStatus, type StorageStatus } from "./storage/content-store";
 import { RegistryWorkspace, type RegistryViewState } from "./registry/RegistryWorkspace";
 import { assertUnambiguousMountPaths, attachmentId, isSafeWorkspacePath, migratePortableWorkspace, WORKSPACE_SCHEMA_URL, type PortableWorkspace, type WorkspaceAttachment } from "./workspace/format";
@@ -25,9 +25,10 @@ import { DialogShell } from "./DialogShell";
 import { LessonLaunchDialog, type LessonLaunchReview } from "./LessonLaunchDialog";
 import { LessonUpdateDialog } from "./LessonUpdateDialog";
 import { reportIssues, type NotebookReport, type ReportFormat, type ReportOptions } from "./export/model";
-import { markdownComponents } from "./markdown-components";
+import { lessonSectionFromHref, markdownComponents } from "./markdown-components";
 import { applyStudioTheme, readStudioTheme, saveStudioTheme, type StudioTheme } from "./theme";
 import { CodeEditor } from "./CodeEditor";
+import { DocumentTabs, type DocumentTabView } from "./DocumentTabs";
 
 type Cell = NotebookCell & { result?: ExecutionResult; editing?: boolean };
 type JavaScriptTranslation = { biolangSource: string; javascriptSource?: string; error?: string; edited?: boolean; direct?: boolean; syncing?: boolean; independent?: boolean; syncError?: string };
@@ -40,6 +41,7 @@ const NOTICE_TIMEOUT_MS: Record<NonNullable<Notice>["tone"], number> = {
   bad: 12_000,
 };
 type WorkspaceView = "notebook" | "registry";
+type SidebarPanel = "lessons" | "data" | "variables";
 type DisplayBlock = { key: string; step?: NonNullable<NotebookCell["step"]>; items: Array<{ cell: Cell; index: number }> };
 type RunRecord = {
   $schema: "https://lang.bio/schemas/studio-run-v1.json";
@@ -67,12 +69,15 @@ type NotebookDocument = {
   dirty: boolean;
   lastRun?: RunRecord;
   nativeFile?: NativeDocumentBinding;
+  pinned: boolean;
+  codeLanguage: NotebookCodeLanguage;
 };
 type DocumentTabGroup = {
   key: string;
   label: string;
   documents: NotebookDocument[];
   collection: boolean;
+  pinned: boolean;
 };
 type UrlDataDraft = { url: string; path: string; mediaType: string; expectedBytes: string; expectedSha256: string; shared: boolean };
 
@@ -97,8 +102,9 @@ function inferredMediaType(path: string) {
   return "text/plain";
 }
 
-function createNotebook(filename = "untitled.bln", source = SAMPLE, lesson: LessonManifest | null = null, lessonManifestSha256?: string): NotebookDocument {
-  return { id: crypto.randomUUID(), filename, cells: parseNotebook(source), lesson, lessonManifestSha256, validThrough: -1, dataReady: {}, dirty: false };
+function createNotebook(filename = "untitled.bln", source = SAMPLE, lesson: LessonManifest | null = null, lessonManifestSha256?: string, defaultLanguage = readNotebookCodeLanguage()): NotebookDocument {
+  const requestedLanguage = readNotebookSourceLanguage(source, defaultLanguage);
+  return { id: crypto.randomUUID(), filename, cells: parseNotebook(source), lesson, lessonManifestSha256, validThrough: -1, dataReady: {}, dirty: false, pinned: false, codeLanguage: readExperimentalJavaScriptNotebooks() ? requestedLanguage : "biolang" };
 }
 
 function collectionKey(document: NotebookDocument) {
@@ -118,9 +124,10 @@ function groupDocumentTabs(documents: NotebookDocument[]): DocumentTabGroup[] {
       label: document.lesson?.schema === 2 ? document.lesson.title : document.filename,
       documents: [document],
       collection: document.lesson?.schema === 2,
+      pinned: document.pinned,
     });
   }
-  return groups;
+  return groups.sort((left, right) => Number(right.pinned) - Number(left.pinned));
 }
 
 function groupNotebookCells(cells: Cell[]): DisplayBlock[] {
@@ -197,7 +204,7 @@ function lessonLaunchFromLocation(): { request: LessonLaunchRequest | null; erro
 async function inspectLessonManifest(rawUrl: string, baseUrl: string, expectedHash?: string, expectedId?: string, signal?: AbortSignal) {
   const parsedUrl = new URL(rawUrl, baseUrl);
   if (parsedUrl.protocol !== "https:" && !(parsedUrl.protocol === "http:" && isLoopbackUrl(parsedUrl))) throw new Error("Lesson manifests must use HTTPS (HTTP loopback URLs are allowed for local development).");
-  const response = await fetch(parsedUrl.href, { credentials: "omit", referrerPolicy: "no-referrer", cache: "no-cache", signal });
+  const response = await fetch(parsedUrl.href, lessonFetchOptions(signal));
   if (!response.ok) throw new Error(`Lesson manifest returned HTTP ${response.status}.`);
   const manifestText = await response.text();
   const observedSha256 = await sha256(manifestText);
@@ -221,8 +228,14 @@ const ResultView = memo(function ResultView({ result }: { result?: ExecutionResu
   </div>;
 });
 
-const MarkdownView = memo(function MarkdownView({ source, index, edit }: { source: string; index: number; edit: (index: number) => void }) {
-  return <div className="prose" onDoubleClick={() => edit(index)}><ReactMarkdown remarkPlugins={[remarkGfm]} components={MARKDOWN_COMPONENTS}>{source}</ReactMarkdown></div>;
+const MarkdownView = memo(function MarkdownView({ source, index, edit, navigateLessonSection }: { source: string; index: number; edit: (index: number) => void; navigateLessonSection: (entryId: string) => void }) {
+  return <div className="prose" onClick={event => {
+    const anchor = event.target instanceof Element ? event.target.closest<HTMLAnchorElement>("a") : null;
+    const lessonSection = lessonSectionFromHref(anchor?.getAttribute("href") ?? undefined);
+    if (!lessonSection) return;
+    event.preventDefault();
+    navigateLessonSection(lessonSection);
+  }} onDoubleClick={() => edit(index)}><ReactMarkdown remarkPlugins={[remarkGfm]} components={MARKDOWN_COMPONENTS}>{source}</ReactMarkdown></div>;
 });
 
 const AutoGrowTextarea = memo(function AutoGrowTextarea({ label, className, value, spellCheck, change, blur, run }: {
@@ -311,6 +324,10 @@ export default function App() {
   if (!initialDocuments.current) initialDocuments.current = [createNotebook()];
   const [documents, setDocuments] = useState<NotebookDocument[]>(initialDocuments.current);
   const [activeDocumentId, setActiveDocumentId] = useState(initialDocuments.current[0].id);
+  const documentsRef = useRef(documents);
+  documentsRef.current = documents;
+  const activeDocumentIdRef = useRef(activeDocumentId);
+  activeDocumentIdRef.current = activeDocumentId;
   const [lastClosed, setLastClosed] = useState<NotebookDocument | null>(null);
   const [workspaceName, setWorkspaceName] = useState("BioLang workspace");
   const [workspaceNativeFile, setWorkspaceNativeFile] = useState<NativeDocumentBinding | null>(null);
@@ -328,12 +345,15 @@ export default function App() {
   const [kernelKind, setKernelKind] = useState<KernelKind>("browser");
   const [kernelState, setKernelState] = useState("starting");
   const [colorTheme, setColorTheme] = useState<StudioTheme>(readStudioTheme);
-  const [codeLanguage, setCodeLanguage] = useState<NotebookCodeLanguage>(readNotebookCodeLanguage);
+  const [experimentalJavaScriptNotebooks, setExperimentalJavaScriptNotebooks] = useState(readExperimentalJavaScriptNotebooks);
   const [javascriptTranslations, setJavascriptTranslations] = useState<Record<string, JavaScriptTranslation>>({});
   const javascriptSyncTimers = useRef<Map<string, number>>(new Map());
   const javascriptSyncRevisions = useRef<Map<string, number>>(new Map());
   const [kernelEpoch, setKernelEpoch] = useState(0);
   const [running, setRunning] = useState(false);
+  const runningRef = useRef(running);
+  runningRef.current = running;
+  const [selectedCellId, setSelectedCellId] = useState("");
   const [notice, setNoticeState] = useState<Notice>(INITIAL_NOTICE);
   const setNotice = useCallback((next: Notice) => setNoticeState(current => current?.tone === "bad" && next?.tone === "info" ? current : next), []);
   useEffect(() => {
@@ -345,6 +365,12 @@ export default function App() {
   }, [notice]);
   const [variables, setVariables] = useState<VariableSummary[]>([]);
   const [variableRevision, setVariableRevision] = useState(0);
+  const [sidebarPanel, setSidebarPanel] = useState<SidebarPanel>(() => {
+    try {
+      const stored = localStorage.getItem("biolang-studio-sidebar-panel");
+      return stored === "data" || stored === "variables" ? stored : "lessons";
+    } catch { return "lessons"; }
+  });
   const [collapsedSteps, setCollapsedSteps] = useState<Set<string>>(() => new Set());
   const [progress, setProgress] = useState<Record<string, number>>({});
   const [remoteOpen, setRemoteOpen] = useState(false);
@@ -381,8 +407,18 @@ export default function App() {
   const [registryDetailError, setRegistryDetailError] = useState("");
   const [preparedRegistryDatasets, setPreparedRegistryDatasets] = useState<Set<string>>(() => new Set());
   const activeDocument = documents.find(document => document.id === activeDocumentId) ?? documents[0];
-  const { cells, lesson, filename, validThrough, dataReady } = activeDocument;
+  const { cells, lesson, filename, validThrough, dataReady, codeLanguage } = activeDocument;
+  const activeCodeLanguage: NotebookCodeLanguage = experimentalJavaScriptNotebooks ? codeLanguage : "biolang";
   const documentTabGroups = useMemo(() => groupDocumentTabs(documents), [documents]);
+  const documentTabViews = useMemo<DocumentTabView[]>(() => documentTabGroups.map(group => ({
+    key: group.key,
+    label: group.label,
+    count: group.documents.length,
+    collection: group.collection,
+    active: group.documents.some(document => document.id === activeDocumentId),
+    dirty: group.documents.some(document => document.dirty),
+    pinned: group.pinned,
+  })), [documentTabGroups, activeDocumentId]);
   const activeCollectionEntries = useMemo(() => lesson?.schema === 2 ? manifestLessonEntries(lesson) : [], [lesson]);
   const activeCollectionEntry = lesson?.schema === 2 ? lessonEntryForDocument(lesson, filename) : undefined;
   const activeCollectionIndex = activeCollectionEntry ? activeCollectionEntries.findIndex(entry => entry.id === activeCollectionEntry.id) : -1;
@@ -400,6 +436,8 @@ export default function App() {
   useEffect(() => {
     if (activeDocument.lesson?.schema === 2) collectionSelectionRef.current[collectionKey(activeDocument)] = activeDocument.id;
   }, [activeDocument]);
+
+  useEffect(() => setSelectedCellId(""), [activeDocumentId]);
 
   function updateDocument(id: string, updater: (document: NotebookDocument) => NotebookDocument) {
     setDocuments(current => current.map(document => document.id === id ? updater(document) : document));
@@ -426,6 +464,13 @@ export default function App() {
     updateDocument(activeDocumentId, document => ({ ...document, dataReady: typeof next === "function" ? next(document.dataReady) : next }));
   }
 
+  function setNotebookCodeLanguage(language: NotebookCodeLanguage) {
+    if (language === "javascript" && !experimentalJavaScriptNotebooks) return;
+    if (running || language === codeLanguage) return;
+    updateDocument(activeDocumentId, document => ({ ...document, codeLanguage: language }));
+    saveNotebookCodeLanguage(language);
+  }
+
   useEffect(() => {
     fetch("./catalog/index.json").then(response => response.json()).then((builtIn: CatalogEntry[]) => {
       const installed = installedLessons();
@@ -445,7 +490,16 @@ export default function App() {
     return () => preference.removeEventListener("change", syncTheme);
   }, [colorTheme]);
 
-  useEffect(() => saveNotebookCodeLanguage(codeLanguage), [codeLanguage]);
+  useEffect(() => {
+    saveExperimentalJavaScriptNotebooks(experimentalJavaScriptNotebooks);
+    if (experimentalJavaScriptNotebooks || !documents.some(document => document.codeLanguage === "javascript")) return;
+    setDocuments(current => current.map(document => document.codeLanguage === "javascript" ? { ...document, codeLanguage: "biolang" } : document));
+    saveNotebookCodeLanguage("biolang");
+  }, [experimentalJavaScriptNotebooks, documents]);
+
+  useEffect(() => {
+    try { localStorage.setItem("biolang-studio-sidebar-panel", sidebarPanel); } catch { /* private storage may be unavailable */ }
+  }, [sidebarPanel]);
 
   useEffect(() => {
     let active = true;
@@ -461,6 +515,8 @@ export default function App() {
         validThrough: -1,
         dataReady: notebook.dataReady ?? {},
         dirty: false,
+        pinned: notebook.pinned ?? false,
+        codeLanguage: notebook.codeLanguage ?? readNotebookSourceLanguage(notebook.source, readNotebookCodeLanguage()),
       }));
       setWorkspaceName(restored.name);
       setDocuments(restoredDocuments);
@@ -502,6 +558,14 @@ export default function App() {
     let alive = true;
     const kernel: Kernel = kernelKind === "desktop" ? new DesktopKernel(activeDocumentId) : kernelKind === "somer" ? new SomerKernel(remoteUrl, remoteToken) : new WasmKernel();
     kernelRef.current?.dispose(); kernelRef.current = kernel; attachedRef.current.clear(); setKernelState("starting"); setVariables([]); setVariableRevision(current => current + 1);
+    // Generated JavaScript belongs to the runtime that produced it. Rebuild it
+    // after a kernel/runtime restart so an open notebook cannot keep showing an
+    // older structural frontend. Explicit user-edited JavaScript remains theirs.
+    setJavascriptTranslations(current => Object.fromEntries(
+      Object.entries(current).filter(([, translation]) =>
+        translation.edited && !isLegacyGeneratedJavaScript(translation.javascriptSource)
+      ),
+    ));
     updateDocument(activeDocumentId, document => ({ ...document, validThrough: -1, cells: document.cells.map(cell => cell.type === "code" && cell.result ? { ...cell, status: "stale" } : cell) }));
     kernel.initialize().then(async () => {
       const applicable = workspaceAttachments.filter(attachment => attachment.scope.kind === "workspace" || attachment.scope.notebookId === activeDocumentId);
@@ -520,13 +584,13 @@ export default function App() {
   }, [kernelKind, remoteUrl, remoteToken, activeDocumentId, kernelEpoch]);
 
   useEffect(() => {
-    if (kernelState !== "ready") return;
+    if (!experimentalJavaScriptNotebooks || kernelState !== "ready") return;
     let alive = true;
     const pending = cells.filter(cell => cell.type === "code").filter(cell => javascriptTranslations[cell.id]?.biolangSource !== executableSource(cell.source));
     if (!pending.length) return;
     void Promise.all(pending.map(async cell => {
       const biolangSource = executableSource(cell.source);
-      if (cell.javascriptSource) return [cell.id, {
+      if (cell.javascriptSource && !isLegacyGeneratedJavaScript(cell.javascriptSource)) return [cell.id, {
         biolangSource, javascriptSource: cell.javascriptSource, edited: true,
         direct: cell.javascriptSource.startsWith("// Direct JavaScript API;"),
         independent: Boolean(cell.javascriptIndependent),
@@ -539,7 +603,7 @@ export default function App() {
       catch (error) { return [cell.id, { biolangSource, error: error instanceof Error ? error.message : String(error) }] as const; }
     })).then(entries => alive && setJavascriptTranslations(current => ({ ...current, ...Object.fromEntries(entries) })));
     return () => { alive = false; };
-  }, [cells, kernelState, kernelKind, javascriptTranslations]);
+  }, [cells, kernelState, kernelKind, javascriptTranslations, experimentalJavaScriptNotebooks]);
 
   useEffect(() => {
     if (!sessionReadyRef.current) return;
@@ -712,6 +776,16 @@ export default function App() {
   }, [pendingLaunchRunId, lesson?.id, pendingLessonData.length, running, kernelState, cells.length]);
 
   useEffect(() => {
+    const runShortcut = (event: KeyboardEvent) => {
+      if (workspaceView !== "notebook" || running || kernelState !== "ready" || !(event.ctrlKey || event.metaKey) || !event.shiftKey || event.key !== "Enter") return;
+      event.preventDefault();
+      runAll(false);
+    };
+    addEventListener("keydown", runShortcut);
+    return () => removeEventListener("keydown", runShortcut);
+  }, [workspaceView, running, kernelState, activeDocumentId, cells.length, pendingLessonData.length, activeCodeLanguage]);
+
+  useEffect(() => {
     let active = true;
     const controller = new AbortController();
     setRegistryDatasetDetails(null); setRegistryDetailError("");
@@ -741,8 +815,10 @@ export default function App() {
         id: document.id,
         filename: document.filename.trim() || "untitled.bln",
         source: serializeNotebook(document.cells),
+        codeLanguage: document.codeLanguage,
         ...(document.lesson ? { lesson: document.lesson } : {}),
         ...(document.lessonManifestSha256 ? { lessonManifestSha256: document.lessonManifestSha256 } : {}),
+        ...(document.pinned ? { pinned: true } : {}),
         dataReady: document.dataReady,
         attachmentIds: workspaceAttachments.filter(attachment => attachment.scope.kind === "workspace" || attachment.scope.notebookId === document.id).map(attachment => attachment.id),
       })),
@@ -903,10 +979,12 @@ export default function App() {
     const link = registered
       ? registryLessonShareUrl(location.href, registered.id, registered.version)
       : manifestLessonShareUrl(location.href, installed.manifest, installed.manifestSha256);
+    const shared = new URL(link);
+    shared.searchParams.set("lang", activeCodeLanguage === "javascript" ? "js" : "bl");
     try {
-      await navigator.clipboard.writeText(link);
+      await navigator.clipboard.writeText(shared.href);
       setNotice({ tone: "good", text: registered ? "Copied an exact registry lesson link." : "Copied a checksum-pinned direct lesson link." });
-    } catch { setNotice({ tone: "info", text: link }); }
+    } catch { setNotice({ tone: "info", text: shared.href }); }
   }
 
   function closeLessonLaunch() {
@@ -950,13 +1028,13 @@ export default function App() {
     finally { setVariableRevision(current => current + 1); }
   }
 
-  async function runTo(end: number, restart = false) {
+  async function runTo(end: number, restart = false, requestedStart?: number) {
     if (running) return;
     if (!kernelRef.current || kernelState !== "ready") {
       setNotice({ tone: "info", text: "BioLang is still starting. Run will be available when the kernel status changes to ready." });
       return;
     }
-    if (codeLanguage === "javascript" && cells.slice(0, end + 1).some(cell => cell.type === "code" && cell.javascriptIndependent) && !kernelRef.current.executeJavaScript) {
+    if (activeCodeLanguage === "javascript" && cells.slice(0, end + 1).some(cell => cell.type === "code" && cell.javascriptIndependent) && !kernelRef.current.executeJavaScript) {
       setNotice({ tone: "info", text: "JavaScript-owned cells run in the Browser kernel. Equivalent synchronized JavaScript can use the canonical BioLang tab with Desktop or SOMER; JavaScript can also submit an explicit BioLang program through the SOMER SDK." });
       return;
     }
@@ -971,7 +1049,7 @@ export default function App() {
     const runStarted = performance.now();
     const runNotebookId = activeDocumentId;
     const runFilename = filename;
-    const runLanguage = codeLanguage;
+    const runLanguage = activeCodeLanguage;
     const runSource = serializeNotebook(cells);
     const runnableCells = cells.slice(0, end + 1).filter(cell => cell.type === "code" && !directives(cell.source).skip);
     let compiledEntries: Array<readonly [string, ReturnType<typeof compileNotebookCode>]>;
@@ -981,7 +1059,7 @@ export default function App() {
         let javascriptSource = javascriptTranslations[cell.id]?.biolangSource === biolangSource
           ? javascriptTranslations[cell.id].javascriptSource : undefined;
         if (runLanguage === "javascript" && !javascriptSource) {
-          if (!kernelRef.current?.transpileJavaScript) throw new Error("This JavaScript cell has not been translated yet. Switch to the Browser kernel once to prepare its structural JavaScript frontend.");
+          if (!kernelRef.current?.transpileJavaScript) throw new Error("This JavaScript cell has not been translated yet. Switch to the Browser kernel once to prepare its JavaScript view.");
           const generatedSource = await kernelRef.current.transpileJavaScript(biolangSource);
           javascriptSource = generatedSource;
           setJavascriptTranslations(current => ({ ...current, [cell.id]: { biolangSource, javascriptSource: generatedSource, direct: generatedSource.startsWith("// Direct JavaScript API;") } }));
@@ -1005,9 +1083,9 @@ export default function App() {
     let runError: string | undefined;
     let executingIndex = -1;
     const actualExecutedSources: string[] = [];
-    let start = Math.max(0, validThrough + 1);
+    let start = requestedStart === undefined ? Math.max(0, validThrough + 1) : Math.max(0, Math.min(requestedStart, end));
     try {
-      if (restart || needsResetRef.current || end <= validThrough || kernelKind === "somer") {
+      if (restart || needsResetRef.current || (requestedStart === undefined && end <= validThrough) || kernelKind === "somer") {
         await kernelRef.current.reset(); needsResetRef.current = false; start = 0; setValidThrough(-1);
         updateDocument(runNotebookId, document => ({ ...document, cells: document.cells.map(cell => cell.type === "code" && cell.result ? { ...cell, status: "stale" } : cell) }));
       }
@@ -1091,6 +1169,41 @@ export default function App() {
     }
   }
 
+  function runAll(restart = false) {
+    if (pendingLessonData.length) { void prepareAndRunAll(); return; }
+    void runTo(cells.length - 1, restart);
+  }
+
+  function runFromSelectedCell() {
+    const selected = cells.findIndex(cell => cell.id === selectedCellId && cell.type === "code");
+    const firstCode = cells.findIndex(cell => cell.type === "code");
+    const start = selected >= 0 ? selected : firstCode;
+    if (start < 0) return;
+    if (pendingLessonData.length) {
+      setNotice({ tone: "info", text: "Prepare the lesson data first, then run from the selected cell." });
+      return;
+    }
+    if (needsResetRef.current || validThrough < start - 1) {
+      setNotice({ tone: "info", text: "Replaying required earlier cells before continuing from the selected cell." });
+      void runTo(cells.length - 1);
+      return;
+    }
+    void runTo(cells.length - 1, false, start);
+  }
+
+  function clearNotebookOutputs() {
+    if (running) return;
+    needsResetRef.current = true;
+    updateDocument(activeDocumentId, document => ({
+      ...document,
+      validThrough: -1,
+      cells: document.cells.map(cell => cell.type === "code" ? { ...cell, status: "", result: undefined } : cell),
+    }));
+    setVariables([]);
+    setVariableRevision(current => current + 1);
+    setNotice({ tone: "info", text: "Cleared notebook outputs. The next run will start from a clean interpreter." });
+  }
+
   async function loadLesson(entry: CatalogEntry, propagateError = false, openFresh = false) {
     try {
       const expectedRevision = entry.manifestSha256?.toLowerCase();
@@ -1102,7 +1215,7 @@ export default function App() {
         return;
       }
       const manifestUrl = new URL(entry.manifest, location.href);
-      const manifestResponse = await fetch(manifestUrl, { credentials: "omit", referrerPolicy: "no-referrer" });
+      const manifestResponse = await fetch(manifestUrl, lessonFetchOptions());
       if (!manifestResponse.ok) throw new Error(`Lesson manifest returned HTTP ${manifestResponse.status}.`);
       const manifestText = await manifestResponse.text();
       if (entry.manifestSha256) {
@@ -1112,7 +1225,7 @@ export default function App() {
       const manifest = validateManifest(JSON.parse(manifestText), { allowLoopback: isLoopbackUrl(manifestUrl) });
       const lessonEntries = manifestLessonEntries(manifest);
       const openedDocuments = await Promise.all(lessonEntries.map(async lessonEntry => {
-        const sourceResponse = await fetch(new URL(lessonEntry.entry, manifestUrl), { credentials: "omit", referrerPolicy: "no-referrer" });
+        const sourceResponse = await fetch(new URL(lessonEntry.entry, manifestUrl), lessonFetchOptions());
         if (!sourceResponse.ok) throw new Error(`${lessonEntry.title} returned HTTP ${sourceResponse.status}.`);
         return createNotebook(`${lessonEntry.id}.bln`, await sourceResponse.text(), manifest, entry.manifestSha256);
       }));
@@ -1149,7 +1262,7 @@ export default function App() {
     if (!window.confirm(`Restore ${filename} from ${lesson.title}?\n\nEdited cells and outputs in this notebook will be replaced. Prepared data and workspace attachments will remain available.`)) return;
     try {
       const manifestUrl = new URL(catalogEntry.manifest, location.href);
-      const manifestResponse = await fetch(manifestUrl, { credentials: "omit", referrerPolicy: "no-referrer" });
+      const manifestResponse = await fetch(manifestUrl, lessonFetchOptions());
       if (!manifestResponse.ok) throw new Error(`Lesson manifest returned HTTP ${manifestResponse.status}.`);
       const manifestText = await manifestResponse.text();
       if (catalogEntry.manifestSha256) {
@@ -1161,7 +1274,7 @@ export default function App() {
       const lessonDocuments = documents.filter(document => document.lesson?.id === lesson.id);
       const siblingIndex = Math.max(0, lessonDocuments.findIndex(document => document.id === activeDocumentId));
       const originalEntry = lessonEntryForDocument(restoredManifest, filename, siblingIndex);
-      const sourceResponse = await fetch(new URL(originalEntry.entry, manifestUrl), { credentials: "omit", referrerPolicy: "no-referrer" });
+      const sourceResponse = await fetch(new URL(originalEntry.entry, manifestUrl), lessonFetchOptions());
       if (!sourceResponse.ok) throw new Error(`${originalEntry.title} returned HTTP ${sourceResponse.status}.`);
       const originalSource = await sourceResponse.text();
       updateDocument(activeDocumentId, document => {
@@ -1441,7 +1554,7 @@ export default function App() {
   }
 
   function saveBrowserFile() {
-    const blob = new Blob([serializeNotebook(cells)], { type: "text/markdown" });
+    const blob = new Blob([withNotebookCodeLanguage(serializeNotebook(cells), activeCodeLanguage)], { type: "text/markdown" });
     const url = URL.createObjectURL(blob); const anchor = document.createElement("a");
     anchor.href = url; anchor.download = filename.trim() || "untitled.bln"; anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
     updateDocument(activeDocumentId, document => ({ ...document, dirty: false }));
@@ -1474,7 +1587,7 @@ export default function App() {
       if (!opened) return;
       const binding = nativeBinding(opened);
       if (existing) {
-        updateDocument(existing.id, document => ({ ...document, filename: opened.filename, cells: parseNotebook(opened.contents), validThrough: -1, dirty: false, nativeFile: binding }));
+        updateDocument(existing.id, document => ({ ...document, filename: opened.filename, cells: parseNotebook(opened.contents), codeLanguage: readNotebookSourceLanguage(opened.contents, document.codeLanguage), validThrough: -1, dirty: false, nativeFile: binding }));
         setActiveDocumentId(existing.id);
       } else {
         const document = createNotebook(opened.filename, opened.contents);
@@ -1497,7 +1610,7 @@ export default function App() {
       const result = await saveNativeDocument({
         kind: "notebook", path: destination ?? sameFile?.path,
         suggestedName: document.filename.trim() || "untitled.bln",
-        contents: serializeNotebook(document.cells), expectedSha256: sameFile?.sha256, overwrite,
+        contents: withNotebookCodeLanguage(serializeNotebook(document.cells), document.codeLanguage), expectedSha256: sameFile?.sha256, overwrite,
       });
       if (!result) return;
       if (result.status === "conflict") {
@@ -1631,26 +1744,62 @@ export default function App() {
     switchNotebook(target.id);
   }
 
+  function documentGroup(key: string) {
+    return documentTabGroups.find(group => group.key === key);
+  }
+
+  function setDocumentGroupPinned(key: string, pinned: boolean) {
+    setDocuments(current => {
+      const memberIds = new Set(groupDocumentTabs(current).find(group => group.key === key)?.documents.map(document => document.id) ?? []);
+      const updated = current.map(document => memberIds.has(document.id) ? { ...document, pinned } : document);
+      return groupDocumentTabs(updated).flatMap(group => group.documents);
+    });
+  }
+
+  function moveDocumentGroup(sourceKey: string, targetKey: string) {
+    setDocuments(current => {
+      const groups = groupDocumentTabs(current);
+      const sourceIndex = groups.findIndex(group => group.key === sourceKey);
+      const targetIndex = groups.findIndex(group => group.key === targetKey);
+      if (sourceIndex < 0 || targetIndex < 0 || sourceIndex === targetIndex) return current;
+      const [moving] = groups.splice(sourceIndex, 1);
+      groups.splice(groups.findIndex(group => group.key === targetKey), 0, moving);
+      return [...groups.filter(group => group.pinned), ...groups.filter(group => !group.pinned)].flatMap(group => group.documents);
+    });
+  }
+
   function switchLessonSection(entryId: string) {
-    if (!lesson || lesson.schema !== 2 || running) return;
-    const target = documents.find(document => collectionKey(document) === collectionKey(activeDocument) &&
+    const currentDocument = documentsRef.current.find(document => document.id === activeDocumentIdRef.current);
+    if (!currentDocument?.lesson || currentDocument.lesson.schema !== 2 || runningRef.current) return;
+    const target = documentsRef.current.find(document => collectionKey(document) === collectionKey(currentDocument) &&
       document.filename.replace(/\.bln$/i, "") === entryId);
-    if (target) switchNotebook(target.id);
+    if (!target || target.id === currentDocument.id) return;
+    needsResetRef.current = false;
+    setCollapsedSteps(new Set());
+    setActiveDocumentId(target.id);
+    setNotice({ tone: "info", text: "Notebook variables are isolated. Saved outputs remain visible but replay before relying on them." });
   }
 
   function closeDocumentGroup(group: DocumentTabGroup) {
     if (running) return;
     if (group.documents.length === 1) { closeNotebook(group.documents[0].id); return; }
-    const dirty = group.documents.filter(document => document.dirty);
-    if (dirty.length && !window.confirm(`Close ${group.label} and its ${group.documents.length} sections?\n\n${dirty.length} section${dirty.length === 1 ? " has" : "s have"} unsaved changes.`)) return;
-    const closingIds = new Set(group.documents.map(document => document.id));
-    const declaredDatasetIds = new Set(group.documents[0].lesson?.datasets.map(dataset => dataset.id) ?? []);
+    closeDocumentGroups([group], `Close ${group.label} and its ${group.documents.length} sections?`);
+  }
+
+  function closeDocumentGroups(groups: DocumentTabGroup[], prompt?: string) {
+    if (running || !groups.length) return;
+    const closingDocuments = groups.flatMap(group => group.documents);
+    const dirty = closingDocuments.filter(document => document.dirty);
+    if (dirty.length && !window.confirm(`${prompt ?? `Close ${groups.length} tabs?`}\n\n${dirty.length} notebook${dirty.length === 1 ? " has" : "s have"} unsaved changes.`)) return;
+    const closingIds = new Set(closingDocuments.map(document => document.id));
+    const remaining = documents.filter(document => !closingIds.has(document.id));
+    const remainingDatasetIds = new Set(remaining.flatMap(document => document.lesson?.datasets.map(dataset => dataset.id) ?? []));
+    const declaredDatasetIds = new Set(closingDocuments.flatMap(document => document.lesson?.datasets.map(dataset => dataset.id) ?? []).filter(id => !remainingDatasetIds.has(id)));
     const retainedAttachments = workspaceAttachmentsRef.current.filter(attachment =>
       !(attachment.scope.kind === "workspace" && attachment.source.kind === "dataset" && declaredDatasetIds.has(attachment.source.dataset.id)) &&
       (attachment.scope.kind === "workspace" || !closingIds.has(attachment.scope.notebookId)));
     workspaceAttachmentsRef.current = retainedAttachments;
     setWorkspaceAttachments(retainedAttachments);
-    const remaining = documents.filter(document => !closingIds.has(document.id));
     setLastClosed(null);
     if (!remaining.length) {
       const replacement = createNotebook();
@@ -1660,8 +1809,20 @@ export default function App() {
       setDocuments(remaining);
       if (closingIds.has(activeDocumentId)) setActiveDocumentId(remaining[0].id);
     }
-    delete collectionSelectionRef.current[group.key];
-    setNotice({ tone: "info", text: `Closed ${group.label}. Its sections were kept together as one lesson collection.` });
+    groups.forEach(group => delete collectionSelectionRef.current[group.key]);
+    setNotice({ tone: "info", text: `Closed ${groups.length === 1 ? groups[0].label : `${groups.length} tabs`}.` });
+  }
+
+  function closeOtherDocumentGroups(key: string) {
+    const keep = documentGroup(key);
+    if (!keep) return;
+    closeDocumentGroups(documentTabGroups.filter(group => group.key !== key), `Close every tab except ${keep.label}?`);
+  }
+
+  function closeDocumentGroupsToRight(key: string) {
+    const index = documentTabGroups.findIndex(group => group.key === key);
+    if (index < 0) return;
+    closeDocumentGroups(documentTabGroups.slice(index + 1), `Close ${documentTabGroups.length - index - 1} tab${documentTabGroups.length - index - 1 === 1 ? "" : "s"} to the right?`);
   }
 
   function closeNotebook(id: string) {
@@ -1756,7 +1917,7 @@ export default function App() {
         let blob: Blob;
         let downloadName: string;
         if (format === "notebook") {
-          blob = new Blob([serializeNotebook(cells)], { type: "text/markdown;charset=utf-8" });
+          blob = new Blob([withNotebookCodeLanguage(serializeNotebook(cells), activeCodeLanguage)], { type: "text/markdown;charset=utf-8" });
           downloadName = `${base}.bln`;
         } else if (format === "script") {
           blob = new Blob([projectExporter.generatedBioLangScript(cells, `${base}.bln`)], { type: "text/plain;charset=utf-8" });
@@ -1809,7 +1970,8 @@ export default function App() {
       id: notebook.id, filename: notebook.filename, cells: parseNotebook(notebook.source),
       lesson: notebook.lesson ? validateManifest(notebook.lesson) : null, validThrough: -1,
       lessonManifestSha256: notebook.lessonManifestSha256,
-      dataReady: notebook.dataReady ?? {}, dirty: false,
+      dataReady: notebook.dataReady ?? {}, dirty: false, pinned: notebook.pinned ?? false,
+      codeLanguage: notebook.codeLanguage ?? readNotebookSourceLanguage(notebook.source, readNotebookCodeLanguage()),
     }));
     pendingWorkspaceBaselineRef.current = Boolean(binding);
     workspaceBaselineRef.current = "";
@@ -2010,30 +2172,30 @@ export default function App() {
       : cell.status === "running" ? { glyph: "◌", label: "Running", state: "Running" }
       : cell.status === "skipped" ? { glyph: "↻", label: "Run again", state: "Skipped" }
       : { glyph: "▶", label: "Run", state: "Not run" };
-    const displayedSource = cell.type === "code" && codeLanguage === "javascript"
-      ? javascriptTranslations[cell.id]?.javascriptSource ?? (javascriptTranslations[cell.id]?.error ? `// Cannot translate this cell yet:\n// ${javascriptTranslations[cell.id].error}` : "// Generating structural JavaScript…")
+    const displayedSource = cell.type === "code" && activeCodeLanguage === "javascript"
+      ? javascriptTranslations[cell.id]?.javascriptSource ?? (javascriptTranslations[cell.id]?.error ? `// Cannot translate this cell yet:\n// ${javascriptTranslations[cell.id].error}` : "// Generating JavaScript…")
       : cell.source;
     const javascriptSyncStatus = javascriptTranslations[cell.id];
-    const javascriptEditable = codeLanguage === "javascript" && Boolean(kernelRef.current?.executeJavaScript && kernelRef.current?.compileJavaScript);
+    const javascriptEditable = activeCodeLanguage === "javascript" && Boolean(kernelRef.current?.executeJavaScript && kernelRef.current?.compileJavaScript);
     const javascriptKnownNames = cells.slice(0, index).flatMap(item => {
       const source = javascriptTranslations[item.id]?.javascriptSource ?? "";
       return [...source.matchAll(/^\s*(?:let|const)\s+([A-Za-z_$][\w$]*)\s*=/gm)].map(match => match[1]);
     });
-    return <article className={`cell cell-${cell.type} ${cell.status ?? ""}`} data-cell-index={index} key={cell.id}>
+    return <article className={`cell cell-${cell.type} ${cell.status ?? ""} ${selectedCellId === cell.id ? "selected" : ""}`} data-cell-index={index} key={cell.id} onPointerDown={() => setSelectedCellId(cell.id)} onFocusCapture={() => setSelectedCellId(cell.id)}>
       <div className="cell-rail">{cell.type === "code" ? <><button aria-label={`${runAction.label} cell ${index + 1}`} title={cell.status === "done" ? "Run again from a clean interpreter; earlier cells will replay" : `${runAction.label}; required earlier cells run automatically`} disabled={running || kernelState !== "ready"} onClick={() => void runTo(index)}>{runAction.glyph}</button><small>{index + 1}</small><em>{runAction.state}</em></> : <><span>¶</span><small>{index + 1}</small></>}</div>
       <div className="cell-body">
-        {cell.type === "code" && <><div className="code-language-tabs" role="tablist" aria-label={`Cell ${index + 1} language`}><button role="tab" aria-selected={codeLanguage === "biolang"} className={codeLanguage === "biolang" ? "active" : ""} onClick={() => setCodeLanguage("biolang")}>BioLang</button><button role="tab" aria-selected={codeLanguage === "javascript"} className={codeLanguage === "javascript" ? "active" : ""} onClick={() => setCodeLanguage("javascript")}>JavaScript</button><span>{codeLanguage === "javascript" ? (javascriptEditable ? javascriptSyncStatus?.syncError ? "Cannot run · fix the highlighted JavaScript" : javascriptSyncStatus?.syncing ? "Checking JavaScript…" : javascriptSyncStatus?.independent ? "JavaScript + bl package · BioLang calls use WASM" : "JavaScript · automatically synchronized where equivalent" : "JavaScript view · use Browser kernel to edit") : "Canonical source · edits regenerate JavaScript"}</span></div><button className="cell-copy-action" aria-label={`Copy ${codeLanguage === "javascript" ? "JavaScript" : "BioLang"} code from cell ${index + 1}`} title={`Copy this ${codeLanguage === "javascript" ? "JavaScript SDK code" : "BioLang code"}`} disabled={!displayedSource} onClick={() => void copyCodeCell(cell, index, codeLanguage)}>Copy</button></>}
+        {cell.type === "code" && <>{experimentalJavaScriptNotebooks ? <div className="code-language-tabs" role="tablist" aria-label={`Cell ${index + 1} language`}><button role="tab" aria-selected={activeCodeLanguage === "biolang"} className={activeCodeLanguage === "biolang" ? "active" : ""} onClick={() => setNotebookCodeLanguage("biolang")}>BioLang</button><button role="tab" aria-selected={activeCodeLanguage === "javascript"} className={activeCodeLanguage === "javascript" ? "active" : ""} onClick={() => setNotebookCodeLanguage("javascript")}>JavaScript</button><span>{activeCodeLanguage === "javascript" ? (javascriptEditable ? javascriptSyncStatus?.syncError ? "Cannot run · fix the highlighted JavaScript" : javascriptSyncStatus?.syncing ? "Checking JavaScript…" : javascriptSyncStatus?.independent ? "JavaScript + bl package · BioLang calls use WASM" : "JavaScript · automatically synchronized where equivalent" : "JavaScript view · use Browser kernel to edit") : "Canonical source · edits regenerate JavaScript"}</span></div> : <div className="code-language-tabs code-language-single"><strong>BioLang</strong><span>Notebook code</span></div>}<button className="cell-copy-action" aria-label={`Copy ${activeCodeLanguage === "javascript" ? "JavaScript" : "BioLang"} code from cell ${index + 1}`} title={`Copy this ${activeCodeLanguage === "javascript" ? "JavaScript SDK code" : "BioLang code"}`} disabled={!displayedSource} onClick={() => void copyCodeCell(cell, index, activeCodeLanguage)}>Copy</button></>}
         {cell.type === "code" ? <CodeEditor
-          key={`${cell.id}-${codeLanguage}`}
-          label={codeLanguage === "javascript" ? `JavaScript equivalent for cell ${index + 1}` : `BioLang cell ${index + 1}`}
-          language={codeLanguage}
+          key={`${cell.id}-${activeCodeLanguage}`}
+          label={activeCodeLanguage === "javascript" ? `JavaScript equivalent for cell ${index + 1}` : `BioLang cell ${index + 1}`}
+          language={activeCodeLanguage}
           value={displayedSource}
-          readOnly={codeLanguage === "javascript" && !javascriptEditable}
+          readOnly={activeCodeLanguage === "javascript" && !javascriptEditable}
           knownNames={javascriptKnownNames}
           diagnostics={source => kernelRef.current?.diagnostics?.(source) ?? Promise.resolve([])}
           completions={prefix => kernelRef.current?.completions?.(prefix) ?? Promise.resolve([])}
           onChange={source => {
-            if (codeLanguage === "biolang") updateCell(index, { source, javascriptSource: undefined, javascriptIndependent: undefined });
+            if (activeCodeLanguage === "biolang") updateCell(index, { source, javascriptSource: undefined, javascriptIndependent: undefined });
             else {
               updateCell(index, { javascriptSource: source });
               setJavascriptTranslations(current => ({ ...current, [cell.id]: { biolangSource: executableSource(cell.source), javascriptSource: source, edited: true, direct: true, syncing: true } }));
@@ -2044,7 +2206,7 @@ export default function App() {
             void runTo(index);
             if (advance) requestAnimationFrame(() => [...document.querySelectorAll<HTMLElement>("article.cell-code .cm-content")].find(editor => Number(editor.closest("article")?.dataset.cellIndex) > index)?.focus());
           }}
-        /> : cell.type === "markdown" && !cell.editing ? <><button className="markdown-edit-action" onClick={() => editMarkdown(index)}>Edit</button><MarkdownView source={cell.source} index={index} edit={editMarkdown}/></> : <AutoGrowTextarea label={`${cell.type} cell ${index + 1}`} className="markdown-editor" value={cell.source} spellCheck change={source => updateCell(index, { source })} blur={() => finishMarkdownCell(index)}/>}
+        /> : cell.type === "markdown" && !cell.editing ? <><button className="markdown-edit-action" onClick={() => editMarkdown(index)}>Edit</button><MarkdownView source={cell.source} index={index} edit={editMarkdown} navigateLessonSection={switchLessonSection}/></> : <AutoGrowTextarea label={`${cell.type} cell ${index + 1}`} className="markdown-editor" value={cell.source} spellCheck change={source => updateCell(index, { source })} blur={() => finishMarkdownCell(index)}/>}
         {cell.type === "code" && <ResultView result={cell.result} />}
       </div>
       <div className="cell-actions"><button aria-label={`Move cell ${index + 1} up`} title="Move cell up" disabled={index === 0} onClick={() => moveCell(index, -1)}>↑</button><button aria-label={`Move cell ${index + 1} down`} title="Move cell down" disabled={index === cells.length - 1} onClick={() => moveCell(index, 1)}>↓</button><button aria-label={`Insert code after cell ${index + 1}`} title="Insert code cell below" onClick={() => insertCodeAfter(index)}>＋</button><button aria-label={`Delete cell ${index + 1}`} title="Delete cell" onClick={() => deleteCell(index)}>×</button></div>
@@ -2068,11 +2230,17 @@ export default function App() {
       <nav className="toolbar">
         {workspaceView === "notebook" && <button onClick={() => setStatisticsGuideOpen(true)}>Guided stats</button>}
         {workspaceView === "notebook" ? <><button onClick={newNotebook}>New</button><button onClick={openFile}>Open</button><button onClick={saveFile}>Save</button><button onClick={() => setExportOpen(true)}>Export</button>{nativeDocumentsAvailable() && <button onClick={() => void saveDesktopNotebook(true)}>Save as…</button>}<details className="workspace-file-menu"><summary>Workspace{workspaceDirty ? " ●" : ""}</summary><div><button onClick={event => { openWorkspace(); event.currentTarget.closest("details")?.removeAttribute("open"); }}>Open .blw</button><button onClick={event => { saveWorkspaceFile(); event.currentTarget.closest("details")?.removeAttribute("open"); }}>{nativeDocumentsAvailable() ? "Save .blw" : "Export .blw"}</button>{nativeDocumentsAvailable() && <button onClick={event => { saveWorkspaceFile(true); event.currentTarget.closest("details")?.removeAttribute("open"); }}>Save .blw as…</button>}<button disabled={!activeDocument.lastRun} onClick={event => { saveRunRecord(); event.currentTarget.closest("details")?.removeAttribute("open"); }}>Export latest run record</button>{recentNativeDocuments.length > 0 && <div className="recent-native"><small>Recent Desktop files</small>{recentNativeDocuments.map(recent => <button key={recent.path} title={recent.path} onClick={event => { openRecentDocument(recent); event.currentTarget.closest("details")?.removeAttribute("open"); }}><span>{recent.filename}</span><em>{recent.kind}</em></button>)}</div>}</div></details>
-          <button className="primary" disabled={running || codeCount === 0 || kernelState !== "ready"} title={kernelState !== "ready" ? "BioLang is still starting" : codeLanguage === "javascript" ? "Run the displayed JavaScript; equivalent cells synchronize to BioLang and bl calls use WASM" : "Run the BioLang cells"} onClick={() => pendingLessonData.length ? void prepareAndRunAll() : void runTo(cells.length - 1, true)}>▶ {pendingLessonData.length ? "Prepare & run all" : "Run all"} · {codeLanguage === "javascript" ? "JS" : "BL"}</button>
-          {running && <button onClick={() => void stopRun()}>Stop</button>}</> : <button onClick={() => void refreshRegistry()}>Refresh registry</button>}
+          </> : <button onClick={() => void refreshRegistry()}>Refresh registry</button>}
       </nav>
+      <details className="studio-settings">
+        <summary>Settings</summary>
+        <div>
+          <strong>Experimental</strong>
+          <label><input type="checkbox" checked={experimentalJavaScriptNotebooks} onChange={event => setExperimentalJavaScriptNotebooks(event.target.checked)} />JavaScript notebook mode</label>
+          <small>Shows JavaScript tabs and lets Run all execute the selected JavaScript frontend. BioLang remains the canonical notebook source.</small>
+        </div>
+      </details>
       <div className="kernel-switch">
-        {workspaceView === "notebook" && <label>Code<select className="code-language-select" aria-label="Notebook code language" value={codeLanguage} disabled={running} onChange={event => setCodeLanguage(event.target.value as NotebookCodeLanguage)}><option value="biolang">BioLang</option><option value="javascript">JavaScript</option></select></label>}
         <label>Theme<select className="theme-select" aria-label="Color theme" value={colorTheme} onChange={event => setColorTheme(event.target.value as StudioTheme)}><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
         <label>Kernel<select aria-label="Kernel" value={kernelKind} disabled={running} onChange={event => {
           const next = event.target.value as KernelKind;
@@ -2088,27 +2256,31 @@ export default function App() {
       <section className="discover"><div className="section-head"><h2>Discover</h2><button title="Refresh registry" onClick={() => void refreshRegistry()}>↻</button></div>
         <div className="discover-summary"><strong>{registrySource === "loading" ? "Checking registry…" : registrySource === "unavailable" ? "Registry unavailable" : `${registryEntries.length} registered item${registryEntries.length === 1 ? "" : "s"}`}</strong><span>{registrySource === "cache" ? "Using the verified offline cache." : "Browse lessons, datasets, workflows and tools."}</span><button onClick={() => navigateWorkspace("registry")}>Browse registry</button></div>
       </section>
-      <section><div className="section-head"><h2>Installed lessons <small>{catalog.length}</small></h2><button title="Add lesson package" onClick={() => setPackageOpen(true)}>＋</button></div>{catalog.length ? <div className="installed-lesson-list">
+      <nav className="sidebar-panel-tabs" role="tablist" aria-label="Notebook sidebar">
+        <button role="tab" aria-selected={sidebarPanel === "lessons"} className={sidebarPanel === "lessons" ? "active" : ""} onClick={() => setSidebarPanel("lessons")}><span>Lessons</span><small>{catalog.length}</small></button>
+        <button role="tab" aria-selected={sidebarPanel === "data"} className={sidebarPanel === "data" ? "active" : ""} onClick={() => setSidebarPanel("data")}><span>Data</span><small>{(lesson?.datasets.length ?? 0) + visibleUserAttachments.length}</small></button>
+        <button role="tab" aria-selected={sidebarPanel === "variables"} className={sidebarPanel === "variables" ? "active" : ""} onClick={() => setSidebarPanel("variables")}><span>Variables</span><small>{variables.length}</small></button>
+      </nav>
+      <div className="sidebar-panel-scroll" role="tabpanel">
+      {sidebarPanel === "lessons" && <section className="sidebar-panel"><div className="section-head"><h2>Installed lessons <small>{catalog.length}</small></h2><button title="Add lesson package" onClick={() => setPackageOpen(true)}>＋</button></div>{catalog.length ? <div className="installed-lesson-list">
         {lessonSeries.groups.map(group => <details className="lesson-series" open key={group.id}><summary><strong>{group.title}</strong><small>{group.items.length}</small></summary><div className="lesson-series-head"><span>Book series</span><a href={group.url} target="_blank" rel="noreferrer">Source ↗</a></div>{group.items.map(renderInstalledLesson)}</details>)}
         {lessonSeries.standalone.map(renderInstalledLesson)}
-      </div> : <div className="empty-catalog"><p>No lesson packages installed.</p><button onClick={() => setPackageOpen(true)}>Add from manifest URL</button></div>}</section>
-      <section><h2>Data <small>{(lesson?.datasets.length ?? 0) + visibleUserAttachments.length}</small></h2><div className="sidebar-data-list">{lesson ? lesson.datasets.map(dataset => <div className={`dataset ${dataReady[dataset.id] ? "ready" : "needs-prepare"}`} key={dataset.id}><div><strong>{dataset.title}</strong><span>{dataReady[dataset.id] ? `${displayBytes(dataset.bytes)} · ready` : `${displayBytes(dataset.bytes)} · not prepared`}</span></div><button disabled={dataReady[dataset.id]} onClick={() => void prepare(dataset.id)}>{dataReady[dataset.id] ? "Ready" : progress[dataset.id] ? `${Math.round(progress[dataset.id] / dataset.bytes * 100)}%` : "Prepare"}</button></div>) : <p className="muted">A lesson can declare the exact data it needs.</p>}
+      </div> : <div className="empty-catalog"><p>No lesson packages installed.</p><button onClick={() => setPackageOpen(true)}>Add from manifest URL</button></div>}</section>}
+      {sidebarPanel === "data" && <section className="sidebar-panel"><h2>Data <small>{(lesson?.datasets.length ?? 0) + visibleUserAttachments.length}</small></h2><div className="sidebar-data-list">{lesson ? lesson.datasets.map(dataset => <div className={`dataset ${dataReady[dataset.id] ? "ready" : "needs-prepare"}`} key={dataset.id}><div><strong>{dataset.title}</strong><span>{dataReady[dataset.id] ? `${displayBytes(dataset.bytes)} · ready` : `${displayBytes(dataset.bytes)} · not prepared`}</span></div><button disabled={dataReady[dataset.id]} onClick={() => void prepare(dataset.id)}>{dataReady[dataset.id] ? "Ready" : progress[dataset.id] ? `${Math.round(progress[dataset.id] / dataset.bytes * 100)}%` : "Prepare"}</button></div>) : <p className="muted">A lesson can declare the exact data it needs.</p>}
         {visibleUserAttachments.map(attachment => <div className={`attached-data ${missingAttachmentIds.has(attachment.id) ? "missing" : ""}`} key={attachment.id}><div><strong>{attachment.path}</strong><span title={attachment.source.kind === "url" ? attachment.source.url : attachment.source.kind === "output" ? `Published from ${attachment.source.producerNotebookFilename}: ${attachment.source.variable}` : undefined}>{missingAttachmentIds.has(attachment.id) ? "needs data · " : `${displayBytes(attachment.size)} · `}{attachment.scope.kind === "workspace" ? "all notebooks" : "this notebook"}{attachment.source.kind === "url" ? " · HTTPS source" : attachment.source.kind === "output" ? ` · output from ${attachment.source.producerNotebookFilename}` : ""}</span></div>{missingAttachmentIds.has(attachment.id) && <button onClick={() => void prepareReferencedAttachment(attachment)}>{attachment.source.kind === "local" || attachment.source.kind === "output" ? "Reattach" : "Prepare"}</button>}<button onClick={() => changeAttachmentScope(attachment)}>{attachment.scope.kind === "workspace" ? "Keep here" : "Share"}</button><button aria-label={`Detach ${attachment.path}`} title="Detach without deleting cached source data" onClick={() => removeAttachmentFromWorkspace(attachment)}>×</button></div>)}
         </div><div className="data-actions"><button onClick={() => {
           if (kernelKind === "desktop") void attachNativeFiles().catch(error => setNotice({ tone: "bad", text: error instanceof Error ? error.message : String(error) }));
           else { reattachTargetRef.current = null; fileInput.current?.click(); }
         }}>Attach local</button><button onClick={() => { setUrlDataReview(false); setUrlDataError(""); setUrlDataOpen(true); }}>From URL…</button></div>
         {kernelKind === "browser" && <details className="runtime-handoff"><summary>Need larger or protected data?</summary><p>Keep the notebook and move only its execution when browser limits are unsuitable.</p><div>{desktopAvailable() && <button onClick={useDesktopKernel}>Use Desktop</button>}<button onClick={useSomerKernel}>Use SOMER…</button></div></details>}
-      </section>
-      <section className="variables-section"><VariableInspector variables={variables} revision={variableRevision} canInspect={kernelRef.current?.capabilities.variableInspection ?? false} exportMode={kernelRef.current?.capabilities.variableExport ?? "none"} canRemove={kernelRef.current?.capabilities.variableRemoval ?? false} inspect={(name, offset, limit) => kernelRef.current!.inspectVariable(name, offset, limit)} exportExact={(name, format, maximumBytes) => kernelRef.current!.exportVariable(name, format, maximumBytes)} publishOutput={publishWorkspaceOutput} notify={setNotice}/></section>
+      </section>}
+      {sidebarPanel === "variables" && <section className="sidebar-panel variables-section"><VariableInspector variables={variables} revision={variableRevision} canInspect={kernelRef.current?.capabilities.variableInspection ?? false} exportMode={kernelRef.current?.capabilities.variableExport ?? "none"} canRemove={kernelRef.current?.capabilities.variableRemoval ?? false} inspect={(name, offset, limit) => kernelRef.current!.inspectVariable(name, offset, limit)} exportExact={(name, format, maximumBytes) => kernelRef.current!.exportVariable(name, format, maximumBytes)} publishOutput={publishWorkspaceOutput} notify={setNotice}/></section>}
+      </div>
       <section className="storage-section"><details className={`storage-disclosure ${localStorageStatus.quota && localStorageStatus.usage / localStorageStatus.quota >= .8 ? "warning" : ""}`}><summary><span>Local storage</span><small>{displayBytes(localStorageStatus.usage)}</small></summary><div className="storage-meter" role="meter" aria-label="Browser storage used" aria-valuemin={0} aria-valuemax={localStorageStatus.quota || 1} aria-valuenow={localStorageStatus.usage}><i style={{ width: `${localStorageStatus.quota ? Math.min(100, localStorageStatus.usage / localStorageStatus.quota * 100) : 0}%` }}/></div><p className="muted">{displayBytes(localStorageStatus.usage)} used{localStorageStatus.quota ? ` of ${displayBytes(localStorageStatus.quota)}` : ""} · {localStorageStatus.persistent ? "protected from automatic eviction" : "browser-managed"}</p><div><button onClick={() => void refreshStorageStatus()}>Refresh</button>{!localStorageStatus.persistent && <button onClick={() => void protectLocalStorage()}>Protect</button>}<button className="danger" onClick={() => void clearCachedWorkspaceData()}>Clear cached data</button></div></details></section>
     </aside>}
     {workspaceView === "notebook" ? <main>
-      <div className="document-tabs"><input aria-label="Workspace name" value={workspaceName} onChange={event => setWorkspaceName(event.target.value)} /><div role="tablist" aria-label="Open notebooks">{documentTabGroups.map(group => {
-        const active = group.documents.some(document => document.id === activeDocumentId);
-        const dirty = group.documents.some(document => document.dirty);
-        return <div className={`document-tab ${group.collection ? "collection" : ""} ${active ? "active" : ""}`} key={group.key}><button role="tab" aria-selected={active} onClick={() => switchDocumentGroup(group)}><span>{group.label}</span>{group.collection && <b title={`${group.documents.length} lesson sections`}>{group.documents.length}</b>}{dirty && <i title="Unsaved changes">●</i>}</button><button aria-label={`Close ${group.label}`} onClick={() => closeDocumentGroup(group)}>×</button></div>;
-      })}</div><button title="New notebook" aria-label="New notebook" onClick={newNotebook}>＋</button>{lastClosed && <button className="reopen-tab" onClick={reopenNotebook}>Reopen closed</button>}</div>
+      <DocumentTabs groups={documentTabViews} workspaceName={workspaceName} canReopen={Boolean(lastClosed)} onWorkspaceNameChange={setWorkspaceName} onSelect={key => { const group = documentGroup(key); if (group) switchDocumentGroup(group); }} onClose={key => { const group = documentGroup(key); if (group) closeDocumentGroup(group); }} onPin={setDocumentGroupPinned} onMove={moveDocumentGroup} onCloseOthers={closeOtherDocumentGroups} onCloseToRight={closeDocumentGroupsToRight} onNew={newNotebook} onReopen={reopenNotebook}/>
+      <div className="notebook-sticky-head">
       <div className="document-head"><div>{activeCollectionEntry ? <div className="collection-heading"><span className="collection-eyebrow">{lesson!.title}</span><div><button aria-label="Previous lesson section" title="Previous section" disabled={activeCollectionIndex <= 0 || running} onClick={() => switchLessonSection(activeCollectionEntries[activeCollectionIndex - 1].id)}>←</button><label><span>Section {activeCollectionIndex + 1} of {activeCollectionEntries.length}</span><select aria-label="Lesson section" value={activeCollectionEntry.id} disabled={running} onChange={event => switchLessonSection(event.target.value)}>{activeCollectionEntries.map(entry => <option key={entry.id} value={entry.id}>{entry.title}</option>)}</select></label><button aria-label="Next lesson section" title="Next section" disabled={activeCollectionIndex >= activeCollectionEntries.length - 1 || running} onClick={() => switchLessonSection(activeCollectionEntries[activeCollectionIndex + 1].id)}>→</button></div><small>{activeCollectionEntry.summary}</small></div> : <><input aria-label="Notebook name" value={filename} onChange={event => setFilename(event.target.value)} /><span>{cells.length} cells · {codeCount} runnable{codeCount ? ` · ${currentCodeCount === codeCount ? "all current" : `${currentCodeCount} current`}` : ""}</span></>}</div>{lesson && <div className="document-provenance">
         {previousSeriesLesson && <button title={previousSeriesLesson.title} onClick={() => void openInstalledLesson(previousSeriesLesson)}>← Previous chapter</button>}
         {nextSeriesLesson && <button title={nextSeriesLesson.title} onClick={() => void openInstalledLesson(nextSeriesLesson)}>Next chapter →</button>}
@@ -2122,6 +2294,25 @@ export default function App() {
         </dl>{lesson.datasets.length > 0 && <details><summary>Dataset checksums</summary>{lesson.datasets.map(dataset => <code key={dataset.id}>{dataset.path} · {dataset.sha256}</code>)}</details>}</div></details>
         <details className="notebook-share"><summary>Share…</summary><div>{activeRegistryLesson && <button onClick={() => void copyCatalogueLink(activeRegistryLesson)}>Copy catalogue link</button>}<button onClick={() => void shareActiveLesson()}>Copy Studio link</button>{activeRegistryLesson && <button onClick={() => void copyChecksumLessonLink(activeRegistryLesson)}>Copy checksum link</button>}</div></details><button title="Replace edited cells and outputs with the lesson package version; prepared data is kept" onClick={() => void restoreOriginalLesson()}>Restore original</button>
       </div>}</div>
+      <div className="notebook-runbar" aria-label="Notebook execution">
+        {experimentalJavaScriptNotebooks ? <><div className="notebook-language" role="group" aria-label="Notebook code language">
+          <span>Code</span>
+          <button aria-pressed={activeCodeLanguage === "biolang"} className={activeCodeLanguage === "biolang" ? "active" : ""} disabled={running} onClick={() => setNotebookCodeLanguage("biolang")}>BioLang</button>
+          <button aria-pressed={activeCodeLanguage === "javascript"} className={activeCodeLanguage === "javascript" ? "active" : ""} disabled={running} onClick={() => setNotebookCodeLanguage("javascript")}>JavaScript</button>
+        </div>
+        <span className="notebook-language-note">Applies to every code cell in this notebook</span></> : <span className="notebook-language-note notebook-language-default">BioLang notebook</span>}
+        <div className="notebook-run-actions">
+          {running && <button className="stop-run" onClick={() => void stopRun()}>Stop</button>}
+          <button className="primary" disabled={running || codeCount === 0 || kernelState !== "ready"} title={kernelState !== "ready" ? "BioLang is still starting" : `Run every cell using ${activeCodeLanguage === "javascript" ? "JavaScript with BioLang WASM" : "BioLang"} (Ctrl+Shift+Enter)`} onClick={() => runAll(false)}>▶ {pendingLessonData.length ? "Prepare & run all" : `Run all ${activeCodeLanguage === "javascript" ? "JavaScript" : "BioLang"}`}</button>
+          <details className="notebook-run-menu"><summary aria-label="More notebook run actions" title="More run actions">•••</summary><div>
+            <button disabled={running || codeCount === 0 || kernelState !== "ready"} onClick={event => { runAll(false); event.currentTarget.closest("details")?.removeAttribute("open"); }}>Run all</button>
+            <button disabled={running || codeCount === 0 || kernelState !== "ready"} onClick={event => { runAll(true); event.currentTarget.closest("details")?.removeAttribute("open"); }}>Restart &amp; run all</button>
+            <button disabled={running || codeCount === 0 || kernelState !== "ready" || pendingLessonData.length > 0} onClick={event => { runFromSelectedCell(); event.currentTarget.closest("details")?.removeAttribute("open"); }}>Run from selected cell</button>
+            <button disabled={running || !cells.some(cell => cell.type === "code" && (cell.result || cell.status))} onClick={event => { clearNotebookOutputs(); event.currentTarget.closest("details")?.removeAttribute("open"); }}>Clear outputs</button>
+          </div></details>
+        </div>
+      </div>
+      </div>
       {notice && <div className={`notice notice-${notice.tone}`} role={notice.tone === "bad" ? "alert" : "status"} aria-live={notice.tone === "bad" ? "assertive" : "polite"}><span>{notice.text}</span><button aria-label="Dismiss message" onClick={() => setNotice(null)}>×</button></div>}
       {(notebookChangedExternally || workspaceChangedExternally) && <div className="external-change" role="alert"><div><strong>Changed outside Studio</strong><span>Reload the disk version, or Save and explicitly confirm an overwrite.</span></div>{notebookChangedExternally && activeDocument.nativeFile && <button onClick={() => void openDesktopNotebook(activeDocument.nativeFile!.path, true)}>Reload notebook</button>}{workspaceChangedExternally && workspaceNativeFile && <button onClick={() => void openDesktopWorkspace(workspaceNativeFile.path, true)}>Reload workspace</button>}</div>}
       <div className="cells">{pendingLessonData.length > 0 && <div className="data-preflight" role="alert"><div><strong>Prepare data before running</strong><span>This lesson needs {pendingLessonData.length} file{pendingLessonData.length === 1 ? "" : "s"}. Browser BioLang can only open them after they are downloaded, verified, and attached.</span></div><button className="primary" onClick={() => void prepareAllLessonData()}>Prepare {pendingLessonData.length === 1 ? "data" : `all ${pendingLessonData.length} files`}</button></div>}{displayBlocks.map(block => block.step ? <section className={`lesson-step ${collapsedSteps.has(block.step.id) ? "collapsed" : ""}`} key={block.key}>

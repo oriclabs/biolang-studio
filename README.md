@@ -124,7 +124,7 @@ When `biolang-studio`, `biolang-registry`, and `biolang-lessons` are sibling dir
 npm run dev
 ```
 
-In development, Studio first reads `/__biolang/registry/v1/index.json` from its own server. The server maps registered `biolang-lessons` manifests to `/__biolang/lessons/`, refreshes their manifest hashes from the working tree, and serves relative `.bln` entries beside each manifest. If the local repositories are unavailable, normal public-registry and GitHub fallbacks still apply. Use `BIOLANG_LOCAL_REGISTRY_DIR` and `BIOLANG_LOCAL_LESSONS_DIR` to override the two server-side directory locations, or `VITE_BIOLANG_REGISTRY_URL` to use another registry endpoint.
+On a loopback development or preview server, Studio reads only `/__biolang/registry/v1/index.json` from that local environment. The server maps registered `biolang-lessons` manifests to `/__biolang/lessons/`, refreshes their manifest hashes from the working tree, and serves relative `.bln` entries beside each manifest. A local refresh never silently falls through to the public registry or reuses a public-registry cache. Deployed Studio reads `https://registry.lang.bio/v1/index.json`, with the GitHub mirror as its same-environment fallback. Use `BIOLANG_LOCAL_REGISTRY_DIR` and `BIOLANG_LOCAL_LESSONS_DIR` to override the two server-side directory locations, or `VITE_BIOLANG_REGISTRY_URL` to make one explicit registry endpoint authoritative.
 
 The **Add lesson package** dialog also accepts `http://localhost` and `http://127.0.0.1` manifests directly. Plain HTTP remains rejected for every non-loopback host, and a public registry cannot direct Studio to a service on the local machine.
 
@@ -137,6 +137,9 @@ crowd the tab strip. Each section retains its own cells, outputs, and execution
 progress when the learner moves between sections. Variables remain isolated;
 the next run reconstructs them by replaying required cells. Declared collection
 data is prepared once and mounted for every section.
+Links written as `#lesson-section=<section-id>` navigate within the same
+collection, allowing lesson authors to put Previous/Next actions directly in
+the notebook while retaining the selector for quick jumps.
 Uninstalling the collection detaches its metadata and cached data but preserves
 edited notebook text as ordinary user documents.
 

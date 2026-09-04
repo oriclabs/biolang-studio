@@ -155,3 +155,11 @@ export function normalizeStandardJavaScriptOutput(value: unknown): unknown {
   }
   return value;
 }
+
+/** Promote a direct JavaScript plot return into Studio's structured plot envelope. */
+export function standardJavaScriptPlot(value: unknown): { kind: "plot"; format: "svg"; data: string } | null {
+  if (typeof value !== "string") return null;
+  const markup = value.trim();
+  if (!/^<svg(?:\s|>)/i.test(markup) || !/<\/svg>$/i.test(markup)) return null;
+  return { kind: "plot", format: "svg", data: markup };
+}

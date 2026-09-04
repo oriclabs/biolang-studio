@@ -96,6 +96,7 @@
 .code-language-tabs button:focus-visible { color: var(--bl-accent); }
 .code-language-tabs button.active { border-bottom-color: var(--bl-accent); color: var(--bl-accent); }
 .code-language-tabs span { margin-left: auto; color: var(--bl-muted); font-size: 9px; }
+.code-language-single strong { color: var(--bl-accent); font-size: 10px; font-weight: 700; }
 .javascript-code-preview {
   min-height: 90px;
   margin: 0;
@@ -104,8 +105,6 @@
   font: 13px/1.6 "Cascadia Code", Consolas, monospace;
   white-space: pre;
 }
-.kernel-switch .code-language-select { min-width: 105px; }
-
 .variables-section { padding-top: 0 !important; }
 .variables-disclosure summary {
   display: flex;

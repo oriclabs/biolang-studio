@@ -1,6 +1,6 @@
 import type { AttachedFile, ExecutionResult, VariableExportFormat, WorkerRequest, WorkerResponse } from "./protocol";
 import { compileSafeJavaScript } from "../notebook/javascript";
-import { normalizeStandardJavaScriptOutput, prepareStandardJavaScript } from "../notebook/standard-javascript";
+import { normalizeStandardJavaScriptOutput, prepareStandardJavaScript, standardJavaScriptPlot } from "../notebook/standard-javascript";
 
 type WasmModule = {
   default: (input?: unknown) => Promise<unknown>;
@@ -26,6 +26,8 @@ type StandardBioLangSession = {
   run(source: unknown): ExecutionResult;
   reset(): void;
   variables(): Array<{ name?: string }>;
+  getValue(name: string, options?: { maximumInlineBytes?: number }): unknown;
+  inspectVariable(name: string, options?: { offset?: number; limit?: number }): { ok: boolean; page?: unknown; error?: string };
   exportVariable(name: string, options?: { format?: string; maximumBytes?: number }): Uint8Array;
   [name: string]: unknown;
 };
@@ -76,15 +78,14 @@ async function loadStandardSession(wasm: WasmModule) {
   return standardSession;
 }
 
-function exportedJavaScriptValue(wasm: WasmModule, name: string): unknown {
-  const bytes = wasm.export_variable(name, "json", 64 * 1024 * 1024);
-  return JSON.parse(new TextDecoder().decode(bytes));
+function exportedJavaScriptValue(session: StandardBioLangSession, name: string): unknown {
+  return session.getValue(name, { maximumInlineBytes: 64 * 1024 * 1024 });
 }
 
-function hydrateStandardScope(wasm: WasmModule, names?: Iterable<string>) {
-  const requested = names ?? (JSON.parse(wasm.list_variables()) as Array<{ name?: string }>).flatMap(item => item.name ? [item.name] : []);
+function hydrateStandardScope(session: StandardBioLangSession, names?: Iterable<string>) {
+  const requested = names ?? session.variables().flatMap(item => item.name ? [item.name] : []);
   for (const name of requested) {
-    try { standardJavaScriptScope[name] = exportedJavaScriptValue(wasm, name); }
+    try { standardJavaScriptScope[name] = exportedJavaScriptValue(session, name); }
     catch { /* Functions and opaque runtime objects remain available only through bl. */ }
   }
 }
@@ -104,8 +105,8 @@ async function executeStandardJavaScript(wasm: WasmModule, source: string): Prom
     ok: false, error: prepared.issues.map(item => item.message).join("\n"), output: "",
     elapsedMs: Math.round((performance.now() - started) * 10) / 10, backend: "browser",
   };
-  hydrateStandardScope(wasm);
   const bl = await loadStandardSession(wasm);
+  hydrateStandardScope(bl);
   const sdk = await loadJavaScriptSdk();
   const output: string[] = [];
   const render = (values: unknown[]) => values.map(value => displayJavaScriptValue(normalizeStandardJavaScriptOutput(value))).join(" ");
@@ -130,12 +131,14 @@ async function executeStandardJavaScript(wasm: WasmModule, source: string): Prom
       };
     }
     const normalized = normalizeStandardJavaScriptOutput(value);
+    const plot = standardJavaScriptPlot(normalized);
     const structured = normalized !== null && typeof normalized === "object";
     return {
       ok: true,
-      ...(structured ? { results: [{ kind: "javascript", value: normalized }] }
+      ...(plot ? { results: [plot] }
+        : structured ? { results: [{ kind: "javascript", value: normalized }] }
         : normalized === undefined ? {} : { value: displayJavaScriptValue(normalized) }),
-      type: Array.isArray(normalized) ? "List" : normalized === null ? "Nil" : typeof normalized,
+      type: plot ? "Plot" : Array.isArray(normalized) ? "List" : normalized === null ? "Nil" : typeof normalized,
       output: output.join("\n"), compiledSource: source,
       elapsedMs: Math.round((performance.now() - started) * 10) / 10, backend: "browser",
     };
@@ -165,7 +168,8 @@ async function handle(request: WorkerRequest): Promise<unknown> {
       };
     case "execute": {
       const started = performance.now();
-      const result = JSON.parse(wasm.evaluate(request.source)) as ExecutionResult & { structured?: unknown };
+      const session = await loadStandardSession(wasm);
+      const result = session.run(request.source) as ExecutionResult & { structured?: unknown };
       if (!result.ok && /operation not supported|cannot open/i.test(result.error ?? "")) {
         const attached = [...new Set(files.keys())];
         result.error = `${result.error}\nAttached browser files: ${attached.join(", ") || "none"}${attached.length ? "" : "\nHint: open Data and choose Prepare for lesson data, or Attach for your own file."}`;
@@ -184,14 +188,15 @@ async function handle(request: WorkerRequest): Promise<unknown> {
       const directSource = generated.source.startsWith("// Direct JavaScript API;");
       const safe = compileSafeJavaScript(request.javascriptSource, javascriptVariables.keys());
       if (safe?.ok) {
-        const result = JSON.parse(wasm.evaluate(safe.biolangSource)) as ExecutionResult;
+        const session = await loadStandardSession(wasm);
+        const result = session.run(safe.biolangSource);
         result.compiledSource = safe.biolangSource;
         result.elapsedMs = Math.round((performance.now() - started) * 10) / 10;
         result.backend = "browser";
         if (result.ok) {
           const bio = await loadJavaScriptSdk();
           for (const name of safe.bindingNames) javascriptVariables.set(name, (bio.ref as (name: string) => unknown)(name));
-          hydrateStandardScope(wasm, safe.bindingNames);
+          hydrateStandardScope(session, safe.bindingNames);
         }
         return result;
       }
@@ -202,6 +207,7 @@ async function handle(request: WorkerRequest): Promise<unknown> {
         "bio", "bl", ...priorBindings.map(([name]) => name),
         `"use strict"; return (async () => { ${executable} })()`,
       );
+      const structuralSession = await loadStandardSession(wasm);
       const wrapExpression = (expression: unknown): unknown => {
         if (!expression || typeof expression !== "object" || typeof (expression as { toBioLang?: unknown }).toBioLang !== "function") return expression;
         return new Proxy(expression as Record<PropertyKey, unknown>, {
@@ -216,7 +222,7 @@ async function handle(request: WorkerRequest): Promise<unknown> {
         });
       };
       const direct = {
-        run(program: unknown) { return JSON.parse(wasm.evaluate(bio.sourceOf(program))) as ExecutionResult; },
+        run(program: unknown) { return structuralSession.run(bio.sourceOf(program)); },
         define(name: string, value: unknown) {
           const result = this.run((bio.program as (...items: unknown[]) => unknown)((bio.let_ as (name: string, value: unknown) => unknown)(name, value)));
           if (!result.ok) throw new Error(result.error || `Cannot define ${name}`);
@@ -256,10 +262,9 @@ async function handle(request: WorkerRequest): Promise<unknown> {
     case "completions":
       return JSON.parse(wasm.language_completions(request.prefix));
     case "reset":
-      wasm.reset();
+      (await loadStandardSession(wasm)).reset();
       javascriptVariables.clear();
       for (const name of Object.keys(standardJavaScriptScope)) delete standardJavaScriptScope[name];
-      standardSession = null;
       return null;
     case "clearFiles":
       files.clear();
@@ -268,14 +273,14 @@ async function handle(request: WorkerRequest): Promise<unknown> {
       attach(request.file);
       return null;
     case "listVariables":
-      return JSON.parse(wasm.list_variables());
+      return (await loadStandardSession(wasm)).variables();
     case "inspectVariable": {
-      const envelope = JSON.parse(wasm.inspect_variable(request.name, request.offset, request.limit)) as { ok: boolean; page?: unknown; error?: string };
+      const envelope = (await loadStandardSession(wasm)).inspectVariable(request.name, { offset: request.offset, limit: request.limit });
       if (!envelope.ok || !envelope.page) throw new Error(envelope.error || `Cannot inspect ${request.name}.`);
       return envelope.page;
     }
     case "exportVariable": {
-      const bytes = wasm.export_variable(request.name, request.format, request.maximumBytes);
+      const bytes = (await loadStandardSession(wasm)).exportVariable(request.name, { format: request.format, maximumBytes: request.maximumBytes });
       const mediaTypes = { json: "application/json", csv: "text/csv", tsv: "text/tab-separated-values", text: "text/plain" } as const;
       return { filename: `${request.name}.${request.format === "text" ? "txt" : request.format}`, mediaType: mediaTypes[request.format], bytes };
     }

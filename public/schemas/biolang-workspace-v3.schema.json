@@ -21,8 +21,8 @@
       "type": "object", "additionalProperties": false,
       "required": ["id", "filename", "source", "attachmentIds"],
       "properties": {
-        "id": { "type": "string", "minLength": 1 }, "filename": { "$ref": "#/$defs/safePath" }, "source": { "type": "string" },
-        "lesson": { "$ref": "#/$defs/lesson" }, "lessonManifestSha256": { "type": "string", "pattern": "^[a-fA-F0-9]{64}$" }, "dataReady": { "type": "object", "additionalProperties": { "type": "boolean" } },
+        "id": { "type": "string", "minLength": 1 }, "filename": { "$ref": "#/$defs/safePath" }, "source": { "type": "string" }, "codeLanguage": { "enum": ["biolang", "javascript"] },
+        "lesson": { "$ref": "#/$defs/lesson" }, "lessonManifestSha256": { "type": "string", "pattern": "^[a-fA-F0-9]{64}$" }, "pinned": { "type": "boolean" }, "dataReady": { "type": "object", "additionalProperties": { "type": "boolean" } },
         "attachmentIds": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } }
       }
     },

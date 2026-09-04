@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { normalizeStandardJavaScriptOutput, prepareStandardJavaScript } from "./standard-javascript";
+import { normalizeStandardJavaScriptOutput, prepareStandardJavaScript, standardJavaScriptPlot } from "./standard-javascript";
 
 describe("standard JavaScript notebook cells", () => {
   it("accepts ordinary JavaScript and persists top-level names", () => {
@@ -30,5 +30,12 @@ describe("standard JavaScript notebook cells", () => {
 
   it("does not hide a failed BioLang call inside a successful JavaScript object", () => {
     expect(() => normalizeStandardJavaScriptOutput({ result: { ok: false, error: "mean requires data" } })).toThrow("mean requires data");
+  });
+
+  it("promotes a returned SVG to Studio's plot result", () => {
+    expect(standardJavaScriptPlot('  <svg viewBox="0 0 10 10"><circle r="2"/></svg>  ')).toEqual({
+      kind: "plot", format: "svg", data: '<svg viewBox="0 0 10 10"><circle r="2"/></svg>',
+    });
+    expect(standardJavaScriptPlot("The report contains <svg> markup.</svg> as text")).toBeNull();
   });
 });

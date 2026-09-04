@@ -23,6 +23,7 @@ function push(cells: NotebookCell[], type: NotebookCell["type"], source: string,
 
 const stepStart = /^\s*<!--\s*bl:step(?:\s+title=(?:"([^"]*)"|'([^']*)'))?\s*-->\s*$/i;
 const stepEnd = /^\s*<!--\s*\/bl:step\s*-->\s*$/i;
+const languageMarker = /^\s*<!--\s*bl:language\s+(?:biolang|javascript)\s*-->\s*$/i;
 const executableFence = /^\s*(?:`{3,}|~{3,})\s*(?:bl|biolang)\s*$/im;
 
 function decodeTitle(value: string) {
@@ -42,6 +43,7 @@ export function parseNotebook(source: string): NotebookCell[] {
   let pendingJavaScriptIndependent = false;
   const flush = () => { push(cells, "markdown", prose.join("\n"), step); prose = []; };
   for (let index = 0; index < lines.length;) {
+    if (languageMarker.test(lines[index])) { index += 1; continue; }
     const opening = lines[index].match(stepStart);
     if (opening && !step) {
       flush(); step = { id: crypto.randomUUID(), title: decodeTitle(opening[1] ?? opening[2] ?? "") }; index += 1; continue;

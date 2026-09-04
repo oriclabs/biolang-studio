@@ -6,8 +6,16 @@ const PUBLIC_REGISTRY_URL = `${PUBLIC_REGISTRY_ROOT}v1/index.json`;
 export const FALLBACK_REGISTRY_URL = "https://raw.githubusercontent.com/oriclabs/biolang-registry/main/registry/v1/index.json";
 const configuredRegistryUrl = import.meta.env.VITE_BIOLANG_REGISTRY_URL?.trim();
 const LOCAL_DEVELOPMENT_REGISTRY_URL = "/__biolang/registry/v1/index.json";
-export const DEFAULT_REGISTRY_URL = configuredRegistryUrl || (import.meta.env.DEV ? LOCAL_DEVELOPMENT_REGISTRY_URL : PUBLIC_REGISTRY_URL);
-export const REGISTRY_URLS = [...new Set([DEFAULT_REGISTRY_URL, ...(configuredRegistryUrl ? [PUBLIC_REGISTRY_URL] : []), FALLBACK_REGISTRY_URL])];
+
+export function registryUrlsForEnvironment(options: { configuredUrl?: string; local: boolean }) {
+  const configured = options.configuredUrl?.trim();
+  if (configured) return [configured];
+  return options.local ? [LOCAL_DEVELOPMENT_REGISTRY_URL] : [PUBLIC_REGISTRY_URL, FALLBACK_REGISTRY_URL];
+}
+
+const localStudio = import.meta.env.DEV || (typeof location !== "undefined" && isLoopbackUrl(location.href));
+export const REGISTRY_URLS = registryUrlsForEnvironment({ configuredUrl: configuredRegistryUrl, local: localStudio });
+export const DEFAULT_REGISTRY_URL = REGISTRY_URLS[0];
 
 const CACHE_KEY = "biolang-studio:registry:v1";
 const CACHE_SOURCE_KEY = `${CACHE_KEY}:source`;
@@ -284,9 +292,9 @@ export function validateRegistry(value: unknown, options: { allowLoopback?: bool
 
 export async function fetchRegistry(urls: string[] = REGISTRY_URLS): Promise<{ index: RegistryIndex; source: RegistrySource; checkedAt: string }> {
   let networkError: unknown = new Error("Registry is unavailable.");
-  for (const [index, url] of urls.entries()) {
+  const resolvedUrls = urls.map(url => new URL(url, location.href));
+  for (const resolvedUrl of resolvedUrls) {
     try {
-      const resolvedUrl = new URL(url, location.href);
       if (!isAllowedContentUrl(resolvedUrl.href, isLoopbackUrl(resolvedUrl))) throw new Error("Registry URLs must use HTTPS (HTTP loopback URLs are allowed for local development).");
       const response = await fetch(resolvedUrl, { credentials: "omit", referrerPolicy: "no-referrer", cache: "no-cache" });
       if (!response.ok) throw new Error(`Registry returned HTTP ${response.status}.`);
@@ -304,7 +312,9 @@ export async function fetchRegistry(urls: string[] = REGISTRY_URLS): Promise<{ i
   if (cached) {
     try {
       const cachedSource = localStorage.getItem(CACHE_SOURCE_KEY) ?? "";
-      const allowLoopback = isLoopbackUrl(cachedSource) && urls.some(url => isLoopbackUrl(new URL(url, location.href)));
+      const cachedUrl = new URL(cachedSource, location.href);
+      if (!resolvedUrls.some(url => url.href === cachedUrl.href)) throw new Error("Cached registry belongs to another environment.");
+      const allowLoopback = isLoopbackUrl(cachedUrl);
       return { index: validateRegistry(JSON.parse(cached), { allowLoopback }), source: "cache", checkedAt: localStorage.getItem(CACHE_TIME_KEY) ?? "" };
     } catch {
       localStorage.removeItem(CACHE_KEY);

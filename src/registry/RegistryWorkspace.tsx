@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   DEFAULT_REGISTRY_URL,
   filterRegistry,
@@ -86,13 +86,13 @@ function checkedLabel(value: string) {
   return Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString() : "previously";
 }
 
-function EntryBadges({ entry, installed, outdated, opened, modified, prepared }: { entry: RegistryEntry; installed: boolean; outdated: boolean; opened: boolean; modified: boolean; prepared: boolean }) {
+function EntryBadges({ entry, installed, outdated, opened, modified, prepared, compact = false }: { entry: RegistryEntry; installed: boolean; outdated: boolean; opened: boolean; modified: boolean; prepared: boolean; compact?: boolean }) {
   return <div className="registry-badges">
-    <span className="integrity-badge" title="The registry pins this manifest to an exact SHA-256 checksum">Checksum pinned</span>
-    <span className={`trust-badge ${entry.verified ? "verified" : "unverified"}`} title={entry.verified ? "The registry has verified this publisher entry" : "The manifest is checksum-protected, but publisher verification has not been granted"}>{entry.verified ? "Publisher verified" : "Publisher unverified"}</span>
-    <span className={`status-badge status-${entry.status}`}>{entry.status}</span>
-    {entry.compatibility.runtimes.includes("browser") && <span className="compat-badge">Browser</span>}
-    {entry.kind === "lesson" && !installed && <span className="state-badge available">Available</span>}
+    {!compact && <span className="integrity-badge" title="The registry pins this manifest to an exact SHA-256 checksum">Checksum pinned</span>}
+    <span className={`trust-badge ${entry.verified ? "verified" : "unverified"}`} title={entry.verified ? "The registry has verified this publisher entry" : "The manifest is checksum-protected, but publisher verification has not been granted"}>{compact ? entry.verified ? "Verified" : "Unverified" : entry.verified ? "Publisher verified" : "Publisher unverified"}</span>
+    {(!compact || entry.status !== "stable") && <span className={`status-badge status-${entry.status}`}>{entry.status}</span>}
+    {!compact && entry.compatibility.runtimes.includes("browser") && <span className="compat-badge">Browser</span>}
+    {!compact && entry.kind === "lesson" && !installed && <span className="state-badge available">Available</span>}
     {installed && <span className="state-badge installed">Installed</span>}
     {opened && <span className="state-badge open">Open</span>}
     {modified && <span className="state-badge modified">Locally modified</span>}
@@ -120,6 +120,7 @@ function RegistrySeriesGroup({ group, selectedKey, children }: { group: Registry
 }
 
 export function RegistryWorkspace(props: RegistryWorkspaceProps) {
+  const detailRef = useRef<HTMLElement>(null);
   const visible = useMemo(() => filterRegistry(props.entries, props.filters as RegistryFilters), [props.entries, props.filters]);
   const groupedLessonBrowse = props.filters.kind === "lesson" && !props.filters.query.trim();
   const lessonBrowse = useMemo(() => {
@@ -143,6 +144,8 @@ export function RegistryWorkspace(props: RegistryWorkspaceProps) {
   const selected = visible.find(entry => entryKey(entry) === props.selectedKey) ?? null;
   const catalogueUrl = publicRegistryUrl(props.filters, props.selectedKey);
 
+  useEffect(() => { detailRef.current?.scrollTo({ top: 0 }); }, [props.selectedKey]);
+
   useEffect(() => {
     if (!props.selectedKey && !props.filters.query && visible.length) {
       const firstDirectResult = groupedLessonBrowse ? lessonBrowse.standalone[0] : visible[0];
@@ -163,7 +166,7 @@ export function RegistryWorkspace(props: RegistryWorkspaceProps) {
     const modified = entry.kind === "lesson" && props.modifiedLessons.has(entryKey(entry));
     const prepared = entry.kind === "dataset" && props.preparedDatasets.has(entry.id);
     return <button className={`registry-result-card kind-${entry.kind} ${entryKey(entry) === props.selectedKey ? "selected" : ""}`} key={entryKey(entry)} onClick={() => props.onSelect(entry)}>
-      <div className="result-card-top"><span className="kind-label">{entry.kind}</span><EntryBadges entry={entry} installed={installed} outdated={outdated} opened={opened} modified={modified} prepared={prepared}/></div>
+      <div className="result-card-top"><span className="kind-label">{entry.kind}</span><EntryBadges entry={entry} installed={installed} outdated={outdated} opened={opened} modified={modified} prepared={prepared} compact/></div>
       {entry.series && <span className="result-series">{insideCollection ? entry.series.chapter : `${entry.series.title} · ${entry.series.chapter}`}</span>}
       <h2>{entry.title}</h2><p>{entry.summary}</p>
       <div className="result-card-tags">{entry.categories.map(category => <span key={category}>{category}</span>)}</div>
@@ -205,7 +208,7 @@ export function RegistryWorkspace(props: RegistryWorkspaceProps) {
 
     <div className="registry-browser">
       <section className="registry-results" aria-label="Registry results">
-        <div className="results-heading"><strong>{visible.length} result{visible.length === 1 ? "" : "s"}</strong><span>{props.filters.query ? `for “${props.filters.query}”` : "from the public registry"}</span></div>
+        <div className="results-heading"><strong>{visible.length} result{visible.length === 1 ? "" : "s"}</strong><span>{props.filters.query ? `for “${props.filters.query}”` : `from ${sourceLabel(props.source)}`}</span></div>
         {props.source === "loading" ? <div className="registry-empty"><strong>Loading the registry…</strong></div> : visible.length ? groupedLessonBrowse ? <>
           {lessonBrowse.groups.map(group => <RegistrySeriesGroup group={group} selectedKey={props.selectedKey} key={group.id}>{group.entries.map(entry => renderResult(entry, true))}</RegistrySeriesGroup>)}
           {lessonBrowse.groups.length > 0 && lessonBrowse.standalone.length > 0 && <h2 className="registry-standalone-heading">Standalone lessons</h2>}
@@ -213,7 +216,7 @@ export function RegistryWorkspace(props: RegistryWorkspaceProps) {
         </> : visible.map(entry => renderResult(entry)) : <div className="registry-empty"><strong>No matching entries</strong><span>Try fewer words or clear one of the filters.</span></div>}
       </section>
 
-      <aside className="registry-detail" aria-label="Registry entry details">
+      <aside ref={detailRef} className="registry-detail" aria-label="Registry entry details">
         {selected ? <RegistryDetail entry={selected} installed={selected.kind === "lesson" && props.installedLessons.has(entryKey(selected))} outdated={selected.kind === "lesson" && props.outdatedLessons.has(entryKey(selected))} opened={selected.kind === "lesson" && props.openLessons.has(entryKey(selected))} modified={selected.kind === "lesson" && props.modifiedLessons.has(entryKey(selected))} prepared={selected.kind === "dataset" && props.preparedDatasets.has(selected.id)} installing={props.installingId === selected.id} details={props.datasetDetails} detailLoading={props.detailLoading} detailError={props.detailError} onInstall={props.onInstall} onOpenLesson={props.onOpenLesson} onShareLesson={props.onShareLesson} onCopyCatalogueLink={props.onCopyCatalogueLink} onCopyChecksumLink={props.onCopyChecksumLink} onPrepare={props.onPrepare} onCopyCommand={props.onCopyCommand}/> : <div className="registry-empty"><strong>Select an entry</strong><span>Its compatibility, provenance and actions will appear here.</span></div>}
       </aside>
     </div>

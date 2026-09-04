@@ -79,6 +79,18 @@ export interface CatalogEntry {
   series?: LessonSeries;
 }
 
+// Lesson URLs on moving branches can retain the same URL across Registry
+// revisions. Bypass the browser/CDN cache whenever integrity is checked so the
+// response bytes are from the revision named by the current Registry checksum.
+export function lessonFetchOptions(signal?: AbortSignal): RequestInit {
+  return {
+    credentials: "omit",
+    referrerPolicy: "no-referrer",
+    cache: "no-store",
+    ...(signal ? { signal } : {}),
+  };
+}
+
 function validSeries(series: LessonSeries | undefined, allowLoopback = false) {
   return !series || (/^[a-z0-9][a-z0-9._-]*$/i.test(series.id) && Boolean(series.title) &&
     isAllowedContentUrl(series.url, allowLoopback) && Number.isInteger(series.order) && series.order >= 0 &&

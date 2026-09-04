@@ -1,4 +1,5 @@
 import type { DatasetManifest, LessonManifest } from "../content/manifest";
+import type { NotebookCodeLanguage } from "../notebook/language";
 
 export type AttachmentScope = { kind: "workspace" } | { kind: "notebook"; notebookId: string };
 
@@ -30,8 +31,10 @@ export interface StoredNotebook {
   id: string;
   filename: string;
   source: string;
+  codeLanguage?: NotebookCodeLanguage;
   lesson?: LessonManifest;
   lessonManifestSha256?: string;
+  pinned?: boolean;
   dataReady?: Record<string, boolean>;
   attachmentIds: string[];
 }
@@ -82,6 +85,8 @@ function validateWorkspaceVersion(value: unknown, schema: 1 | 2 | 3, schemaUrl: 
   for (const notebook of workspace.notebooks) {
     if (typeof notebook?.id !== "string" || !notebook.id || notebookIds.has(notebook.id) || !isSafeWorkspacePath(notebook.filename) || typeof notebook.source !== "string" ||
         (notebook.lessonManifestSha256 !== undefined && !/^[a-f0-9]{64}$/i.test(notebook.lessonManifestSha256)) ||
+        (notebook.codeLanguage !== undefined && notebook.codeLanguage !== "biolang" && notebook.codeLanguage !== "javascript") ||
+        (notebook.pinned !== undefined && typeof notebook.pinned !== "boolean") ||
         !Array.isArray(notebook.attachmentIds) || notebook.attachmentIds.some(id => typeof id !== "string" || !id) || new Set(notebook.attachmentIds).size !== notebook.attachmentIds.length) {
       throw new Error("Workspace contains an invalid notebook record.");
     }

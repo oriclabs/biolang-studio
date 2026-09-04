@@ -2,7 +2,7 @@ import { expect, test } from "@playwright/test";
 import { mkdirSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 
-const REGISTRY = "https://registry.lang.bio/v1/index.json";
+const REGISTRY = "http://127.0.0.1:4178/__biolang/registry/v1/index.json";
 const REGISTRY_FALLBACK = "https://raw.githubusercontent.com/oriclabs/biolang-registry/main/registry/v1/index.json";
 
 test.beforeEach(async ({ page }) => {

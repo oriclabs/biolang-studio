@@ -2,6 +2,17 @@
 .section-head h2{margin:0}
 .section-head h2 small,.sidebar>section>h2 small{font-size:9px;letter-spacing:0;background:#e2e8f0;color:#64748b;border-radius:999px;padding:1px 5px;margin-left:4px}
 .section-head button{border:0;background:transparent;font-size:18px;color:#276957}
+.sidebar{display:flex;flex-direction:column;overflow:hidden}
+.sidebar>.discover{flex:none}
+.sidebar-panel-tabs{display:grid;grid-template-columns:repeat(3,1fr);gap:3px;flex:none;margin:12px 0 9px;padding:3px;border:1px solid #ced8d2;border-radius:8px;background:#dde6e0}
+.sidebar-panel-tabs button{display:grid;grid-template-columns:1fr auto;gap:3px;align-items:center;min-width:0;border:0;border-radius:5px;padding:6px;background:transparent;color:#60716b;font-size:10px;text-align:left}
+.sidebar-panel-tabs button.active{background:#fff;color:#245a4d;box-shadow:0 1px 3px rgb(30 41 59 / 8%);font-weight:800}
+.sidebar-panel-tabs small{border-radius:999px;padding:1px 4px;background:rgb(100 116 139 / 12%);font-size:8px}
+.sidebar-panel-scroll{min-height:0;flex:1;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable;padding-right:3px}
+.sidebar-panel{min-height:100%;padding-top:3px}
+.sidebar-panel>h2 small{font-size:9px;letter-spacing:0;background:#e2e8f0;color:#64748b;border-radius:999px;padding:1px 5px;margin-left:4px}
+.sidebar-panel-scroll .installed-lesson-list,.sidebar-panel-scroll .sidebar-data-list{max-height:none;overflow:visible;padding-right:0}
+.sidebar>.storage-section{flex:none;border-top:1px solid #ccd7d1;margin-top:9px;padding-top:8px}
 .installed-lesson-list,.sidebar-data-list{max-height:min(22vh,220px);overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable;padding-right:3px}
 .lesson-row{display:grid;grid-template-columns:minmax(0,1fr) 26px 26px;align-items:center;border-radius:7px;margin-bottom:2px}
 .lesson-series{border:1px solid #d7e2dd;border-radius:8px;margin:0 0 6px;background:#f8faf9;overflow:hidden}

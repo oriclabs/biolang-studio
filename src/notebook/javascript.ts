@@ -13,7 +13,11 @@ export type SafeJavaScript = {
 
 const FORBIDDEN_PROPERTIES = new Set(["__proto__", "prototype", "constructor"]);
 const BLOCKED_BL_METHODS = new Set([
-  "connectSomer", "define", "exportVariable", "invoke", "raw", "ref", "registerModule", "reset", "run",
+  "builtins", "callNamedFunction", "callValue", "completions", "connectSomer", "csvExpression",
+  "define", "diagnostics", "dispose", "evalValue", "exportVariable", "formatSource", "formatValue",
+  "getValue", "import", "inspectVariable", "invoke", "matrixExpression", "qcMetrics", "raw", "ref",
+  "registerFunction", "registerModule", "reset", "run", "runtimeVersion", "sequence", "setValue",
+  "signature", "supports", "tableExpression", "tokenize", "transpileJavaScript", "validateImport", "variables",
 ]);
 const GLOBAL_NAMES = new Set([
   "document", "eval", "fetch", "Function", "globalThis", "importScripts", "location",
@@ -33,6 +37,10 @@ function propertyName(node: Node): string | null {
   if (node.type === "Identifier") return String(node.name);
   if (node.type === "Literal" && typeof node.value === "string") return node.value;
   return null;
+}
+
+function bioLangMethodName(name: string): string {
+  return name.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`);
 }
 
 /**
@@ -123,6 +131,16 @@ export function compileSafeJavaScript(source: string, priorNames: Iterable<strin
           if (argument.type === "SpreadElement") issues.push(issue(argument, "Spread arguments are not supported."));
           else validateExpression(argument);
         }
+        if (method === "indexValue" || method === "addValues" || method === "equalValues") {
+          if ((node.arguments as Node[]).length !== 2) issues.push(issue(node, `bl.${method}() requires exactly two arguments.`));
+        }
+        if (method === "callNamed") {
+          const [name, positional, named] = node.arguments as Node[];
+          if ((node.arguments as Node[]).length !== 3 || name?.type !== "Literal" || typeof name.value !== "string" ||
+              !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name.value) || positional?.type !== "ArrayExpression" || named?.type !== "ObjectExpression") {
+            issues.push(issue(node, "bl.callNamed() requires a BioLang function name, an argument array, and a named-argument object."));
+          }
+        }
         return;
       }
       case "ChainExpression": validateExpression(node.expression as Node); return;
@@ -194,8 +212,22 @@ export function compileSafeJavaScript(source: string, priorNames: Iterable<strin
       }
       case "CallExpression": {
         const callee = node.callee as Node;
-        const method = propertyName((callee.property as Node));
-        return `${method}(${(node.arguments as Node[]).map(expressionSource).join(", ")})`;
+        const method = propertyName((callee.property as Node))!;
+        const args = node.arguments as Node[];
+        if (method === "indexValue") return `(${expressionSource(args[0])})[${expressionSource(args[1])}]`;
+        if (method === "addValues") return `(${expressionSource(args[0])} + ${expressionSource(args[1])})`;
+        if (method === "equalValues") return `(${expressionSource(args[0])} == ${expressionSource(args[1])})`;
+        if (method === "callNamed") {
+          const name = String(args[0].value);
+          const positional = (args[1].elements as Array<Node | null>).filter((item): item is Node => Boolean(item)).map(expressionSource);
+          const named = (args[2].properties as Node[]).map(property => {
+            const key = propertyName(property.key as Node)!;
+            const renderedKey = /^[A-Za-z_][A-Za-z0-9_]*$/.test(key) ? key : JSON.stringify(key);
+            return `${renderedKey}: ${expressionSource(property.value as Node)}`;
+          });
+          return `${name}(${[...positional, ...named].join(", ")})`;
+        }
+        return `${bioLangMethodName(method!)}(${(node.arguments as Node[]).map(expressionSource).join(", ")})`;
       }
       case "ChainExpression": return expressionSource(node.expression as Node);
       default: throw new Error(`Validated JavaScript node '${node.type}' has no BioLang renderer.`);

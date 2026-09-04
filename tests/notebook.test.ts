@@ -1,13 +1,33 @@
 import { describe, expect, it } from "vitest";
 import { directives, executableSource, expandMixedMarkdown, parseNotebook, serializeNotebook, type NotebookCell } from "../src/notebook/format";
-import { compileNotebookCode, readNotebookCodeLanguage, saveNotebookCodeLanguage } from "../src/notebook/language";
-import { lessonEntryForDocument, manifestLessonEntries, validateManifest } from "../src/content/manifest";
+import { compileNotebookCode, readExperimentalJavaScriptNotebooks, readNotebookCodeLanguage, readNotebookSourceLanguage, saveExperimentalJavaScriptNotebooks, saveNotebookCodeLanguage, withNotebookCodeLanguage } from "../src/notebook/language";
+import { lessonEntryForDocument, lessonFetchOptions, manifestLessonEntries, validateManifest } from "../src/content/manifest";
 import { lessonUpdateAvailable } from "../src/content/installed";
 import { manifestLessonShareUrl, parseLessonLaunchUrl, registryLessonShareUrl, removeLessonLaunchParams } from "../src/content/lesson-links";
-import { filterRegistry, latestRegistryEntry, publicRegistryUrl, searchRegistry, validateRegisteredDatasetManifest, validateRegistry, type RegistryEntry } from "../src/content/registry";
+import { FALLBACK_REGISTRY_URL, filterRegistry, latestRegistryEntry, publicRegistryUrl, registryUrlsForEnvironment, searchRegistry, validateRegisteredDatasetManifest, validateRegistry, type RegistryEntry } from "../src/content/registry";
 import { assertUnambiguousMountPaths, attachmentId, migratePortableWorkspace, validatePortableWorkspace, WORKSPACE_SCHEMA_URL, type WorkspaceAttachment } from "../src/workspace/format";
 
 describe("BioLang notebook format", () => {
+  it("never reuses cached bytes for checksum-verified lesson content", () => {
+    const controller = new AbortController();
+    expect(lessonFetchOptions(controller.signal)).toEqual({
+      credentials: "omit",
+      referrerPolicy: "no-referrer",
+      cache: "no-store",
+      signal: controller.signal,
+    });
+    expect(lessonFetchOptions().cache).toBe("no-store");
+  });
+
+  it("keeps registry refreshes inside the active environment", () => {
+    expect(registryUrlsForEnvironment({ local: true })).toEqual(["/__biolang/registry/v1/index.json"]);
+    expect(registryUrlsForEnvironment({ local: false })).toEqual([
+      "https://registry.lang.bio/v1/index.json",
+      FALLBACK_REGISTRY_URL,
+    ]);
+    expect(registryUrlsForEnvironment({ local: true, configuredUrl: " http://127.0.0.1:4310/v1/index.json " }))
+      .toEqual(["http://127.0.0.1:4310/v1/index.json"]);
+  });
   it("round trips prose and executable fences", () => {
     const source = "# Why\n\n```biolang\nlet x = 4\nx * 2\n```\n\nDone.\n";
     const cells = parseNotebook(source);
@@ -50,6 +70,15 @@ describe("BioLang notebook format", () => {
 });
 
 describe("paired JavaScript lesson view", () => {
+  it("keeps JavaScript notebook controls explicitly experimental", () => {
+    const values = new Map<string, string>();
+    const storage = { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => { values.set(key, value); } };
+    expect(readExperimentalJavaScriptNotebooks(storage)).toBe(false);
+    saveExperimentalJavaScriptNotebooks(true, storage);
+    expect(readExperimentalJavaScriptNotebooks(storage)).toBe(true);
+    saveExperimentalJavaScriptNotebooks(false, storage);
+    expect(readExperimentalJavaScriptNotebooks(storage)).toBe(false);
+  });
   it("keeps structural JavaScript separate from the canonical kernel source", () => {
     const source = "let measurements = [12, 14, 15]\nsummary(measurements)";
     const generated = "let measurements = [12, 14, 15];\nlet result = await bl.summary(measurements);\nresult;";
@@ -66,6 +95,13 @@ describe("paired JavaScript lesson view", () => {
     expect(readNotebookCodeLanguage("https://studio.lang.bio/", storage)).toBe("javascript");
     expect(readNotebookCodeLanguage("https://studio.lang.bio/?lang=bl", storage)).toBe("biolang");
     expect(readNotebookCodeLanguage("https://studio.lang.bio/?lang=js", null)).toBe("javascript");
+  });
+  it("persists a notebook-local language marker without exposing it as a cell", () => {
+    const source = withNotebookCodeLanguage("# Analysis\n\n```biolang\nmean(values)\n```\n", "javascript");
+    expect(readNotebookSourceLanguage(source)).toBe("javascript");
+    expect(parseNotebook(source)[0].source).toBe("# Analysis");
+    expect(withNotebookCodeLanguage(source, "biolang").match(/bl:language/g)).toHaveLength(1);
+    expect(readNotebookSourceLanguage("# No marker", "javascript")).toBe("javascript");
   });
   it("compiles both frontends to the same canonical kernel source", () => {
     const source = "let values = [1, 2, 3]\nmean(values)";
@@ -233,13 +269,17 @@ describe("portable workspaces", () => {
     const digest = "a".repeat(64);
     const workspace = validatePortableWorkspace({
       schema: 3, kind: "biolang-workspace", name: "Teaching", activeNotebookId: "one",
-      notebooks: [{ id: "one", filename: "one.bln", source: "1 + 1\n", lessonManifestSha256: digest, attachmentIds: [attachmentId("table.csv", digest)] }],
+      notebooks: [{ id: "one", filename: "one.bln", source: "1 + 1\n", codeLanguage: "javascript", lessonManifestSha256: digest, pinned: true, attachmentIds: [attachmentId("table.csv", digest)] }],
       attachments: [{ id: attachmentId("table.csv", digest), path: "table.csv", size: 12, sha256: digest, mediaType: "text/csv", scope: { kind: "workspace" }, source: { kind: "local" } }]
     });
     expect(workspace.notebooks[0].source).toBe("1 + 1\n");
     expect(workspace.notebooks[0].lessonManifestSha256).toBe(digest);
+    expect(workspace.notebooks[0].pinned).toBe(true);
+    expect(workspace.notebooks[0].codeLanguage).toBe("javascript");
     expect(JSON.stringify(workspace)).not.toContain("contents");
     expect(() => validatePortableWorkspace({ ...workspace, notebooks: [{ ...workspace.notebooks[0], lessonManifestSha256: "not-a-digest" }] })).toThrow(/notebook record/);
+    expect(() => validatePortableWorkspace({ ...workspace, notebooks: [{ ...workspace.notebooks[0], pinned: "yes" }] })).toThrow(/notebook record/);
+    expect(() => validatePortableWorkspace({ ...workspace, notebooks: [{ ...workspace.notebooks[0], codeLanguage: "python" }] })).toThrow(/notebook record/);
   });
 
   it("rejects escaping paths and incorrectly scoped data", () => {

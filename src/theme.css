@@ -92,6 +92,9 @@ body,
 [data-theme="dark"] .workspace-tabs button.active { background: var(--bl-accent-soft); color: #ddd6fe; }
 
 [data-theme="dark"] .sidebar { background: var(--bl-panel-soft); }
+[data-theme="dark"] .sidebar-panel-tabs { border-color: var(--bl-border); background: var(--bl-bg); }
+[data-theme="dark"] .sidebar-panel-tabs button { color: var(--bl-dim); }
+[data-theme="dark"] .sidebar-panel-tabs button.active { background: var(--bl-panel); color: #ddd6fe; }
 [data-theme="dark"] .sidebar h2,
 [data-theme="dark"] .lesson-link span,
 [data-theme="dark"] .dataset span,
@@ -191,6 +194,7 @@ body,
 [data-theme="dark"] .registry-detail,
 [data-theme="dark"] .detail-card { border-color: var(--bl-border); background: var(--bl-panel); color: var(--bl-text); }
 [data-theme="dark"] .registry-hero { border-color: var(--bl-border); }
+[data-theme="dark"] .results-heading { background: var(--bl-bg); }
 [data-theme="dark"] .registry-hero > div:first-child h1,
 [data-theme="dark"] .registry-result-card h2,
 [data-theme="dark"] .detail-heading h2,

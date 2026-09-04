@@ -19,11 +19,23 @@ function MethodGuide({ children, open }: { children?: ReactNode; open: boolean }
   </details>;
 }
 
-export function markdownComponents(options: { methodGuidesOpen?: boolean } = {}): Components {
+export function lessonSectionFromHref(href: string | undefined): string | undefined {
+  const prefix = "#lesson-section=";
+  if (!href?.startsWith(prefix)) return undefined;
+  const encoded = href.slice(prefix.length);
+  if (!encoded) return undefined;
+  try { return decodeURIComponent(encoded); } catch { return undefined; }
+}
+
+export function markdownComponents(options: { methodGuidesOpen?: boolean; onLessonSection?: (entryId: string) => void } = {}): Components {
   return {
     a: ({ href, children, ...props }) => {
       const external = /^https?:\/\//i.test(href ?? "");
-      return <a href={href} {...props} {...(external ? { target: "_blank", rel: "noopener noreferrer" } : {})}>{children}</a>;
+      const lessonSection = lessonSectionFromHref(href);
+      return <a href={href} {...props}
+        {...(external ? { target: "_blank", rel: "noopener noreferrer" } : {})}
+        {...(lessonSection && options.onLessonSection ? { onClick: (event) => { event.preventDefault(); options.onLessonSection!(lessonSection); } } : {})}
+      >{children}</a>;
     },
     blockquote: ({ children }) => <MethodGuide open={options.methodGuidesOpen ?? false}>{children}</MethodGuide>,
   };
