@@ -1,8 +1,13 @@
-import type { AttachedFile, ExecutionResult, Kernel, KernelCapabilities, VariableExport, VariableExportFormat, VariablePage, VariableSummary, WorkerRequest, WorkerResponse } from "./protocol";
+import type { AttachedFile, ExecutionResult, JavaScriptCompilation, Kernel, KernelCapabilities, LanguageCompletion, LanguageDiagnostic, VariableExport, VariableExportFormat, VariablePage, VariableSummary, WorkerRequest, WorkerResponse } from "./protocol";
 
 type WorkerCall =
   | { method: "initialize"; runtimeBase: string }
   | { method: "execute"; source: string }
+  | { method: "executeJavaScript"; javascriptSource: string; biolangSource: string }
+  | { method: "compileJavaScript"; javascriptSource: string; priorNames: string[] }
+  | { method: "transpileJavaScript"; source: string }
+  | { method: "diagnostics"; source: string }
+  | { method: "completions"; prefix: string }
   | { method: "reset" }
   | { method: "clearFiles" }
   | { method: "attach"; file: AttachedFile }
@@ -56,6 +61,15 @@ export class WasmKernel implements Kernel {
     return capabilities;
   }
   execute(source: string) { return this.call<ExecutionResult>({ method: "execute", source }); }
+  executeJavaScript(javascriptSource: string, biolangSource: string) {
+    return this.call<ExecutionResult>({ method: "executeJavaScript", javascriptSource, biolangSource });
+  }
+  compileJavaScript(javascriptSource: string, priorNames: string[]) {
+    return this.call<JavaScriptCompilation>({ method: "compileJavaScript", javascriptSource, priorNames });
+  }
+  transpileJavaScript(source: string) { return this.call<string>({ method: "transpileJavaScript", source }); }
+  diagnostics(source: string) { return this.call<LanguageDiagnostic[]>({ method: "diagnostics", source }); }
+  completions(prefix = "") { return this.call<LanguageCompletion[]>({ method: "completions", prefix }); }
   reset() { return this.call<void>({ method: "reset" }); }
   async clearFiles() { this.attached.clear(); await this.call<void>({ method: "clearFiles" }); }
   async attach(file: AttachedFile) { this.attached.set(file.path, file); await this.call({ method: "attach", file }); }

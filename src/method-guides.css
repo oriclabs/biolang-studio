@@ -1,0 +1,29 @@
+.prose .method-guide {
+  margin: 12px 0;
+  border: 1px solid #d5dfda;
+  border-left: 4px solid var(--bl-accent);
+  border-radius: 8px;
+  background: #f8faf8;
+  color: #40504b;
+}
+
+.prose .method-guide summary {
+  cursor: pointer;
+  padding: 10px 12px;
+  font-weight: 750;
+  color: #28463f;
+  list-style: none;
+}
+
+.prose .method-guide summary::-webkit-details-marker { display: none; }
+.prose .method-guide summary::before {
+  content: "▸";
+  display: inline-block;
+  width: 18px;
+  color: var(--bl-accent);
+}
+
+.prose .method-guide[open] summary { border-bottom: 1px solid #dce4df; }
+.prose .method-guide[open] summary::before { content: "▾"; }
+.prose .method-guide > div { padding: 2px 14px 10px; }
+.prose .method-guide p { margin: 9px 0; }

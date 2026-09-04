@@ -1,4 +1,5 @@
 import { isAllowedContentUrl } from "./url-policy";
+import type { LessonDiscoverability } from "./registry";
 
 export type RuntimeRequirement = "browser" | "desktop" | "remote";
 
@@ -20,6 +21,15 @@ export interface LessonEntry {
   title: string;
   summary: string;
   entry: string;
+  discoverability?: LessonDiscoverability;
+}
+
+export interface LessonSeries {
+  id: string;
+  title: string;
+  url: string;
+  order: number;
+  chapter: string;
 }
 
 export interface LessonManifest {
@@ -32,9 +42,11 @@ export interface LessonManifest {
   runtime: RuntimeRequirement;
   estimatedMemoryMb: number;
   source: { title: string; url: string; note: string };
+  series?: LessonSeries;
   datasets: DatasetManifest[];
   validation?: string;
   tags: string[];
+  discoverability?: LessonDiscoverability;
 }
 
 function safeEntryPath(path: string) {
@@ -49,14 +61,40 @@ export function manifestLessonEntries(manifest: LessonManifest): LessonEntry[] {
   return manifest.lessons!;
 }
 
+export function lessonEntryForDocument(manifest: LessonManifest, filename: string, siblingIndex = 0): LessonEntry {
+  const entries = manifestLessonEntries(manifest);
+  const basename = filename.replace(/\.bln$/i, "");
+  return entries.find(entry => entry.id === basename) ?? entries[siblingIndex] ?? entries[0];
+}
+
 export interface CatalogEntry {
   id: string;
   title: string;
   summary: string;
+  version?: string;
   manifest: string;
   runtime: RuntimeRequirement;
   tags: string[];
   manifestSha256?: string;
+  series?: LessonSeries;
+}
+
+// Lesson URLs on moving branches can retain the same URL across Registry
+// revisions. Bypass the browser/CDN cache whenever integrity is checked so the
+// response bytes are from the revision named by the current Registry checksum.
+export function lessonFetchOptions(signal?: AbortSignal): RequestInit {
+  return {
+    credentials: "omit",
+    referrerPolicy: "no-referrer",
+    cache: "no-store",
+    ...(signal ? { signal } : {}),
+  };
+}
+
+function validSeries(series: LessonSeries | undefined, allowLoopback = false) {
+  return !series || (/^[a-z0-9][a-z0-9._-]*$/i.test(series.id) && Boolean(series.title) &&
+    isAllowedContentUrl(series.url, allowLoopback) && Number.isInteger(series.order) && series.order >= 0 &&
+    Boolean(series.chapter));
 }
 
 export function validateManifest(value: unknown, options: { allowLoopback?: boolean } = {}): LessonManifest {
@@ -65,7 +103,8 @@ export function validateManifest(value: unknown, options: { allowLoopback?: bool
       !manifest.title || typeof manifest.summary !== "string" ||
       !["browser", "desktop", "remote"].includes(manifest.runtime ?? "") ||
       !manifest.source?.title || !isAllowedContentUrl(manifest.source.url, options.allowLoopback) ||
-      !Array.isArray(manifest.datasets) || !Array.isArray(manifest.tags)) {
+      !Array.isArray(manifest.datasets) || !Array.isArray(manifest.tags) ||
+      !validSeries(manifest.series, options.allowLoopback)) {
     throw new Error("Lesson manifest is missing required fields.");
   }
   if (manifest.schema === 1 && (!manifest.entry || !safeEntryPath(manifest.entry))) {

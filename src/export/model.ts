@@ -22,7 +22,7 @@ export type ReportOptions = {
   includeProvenance: boolean;
   figureFormat?: "svg" | "png";
 };
-export type ReportFormat = "html" | "pdf" | "markdown";
+export type ReportFormat = "html" | "pdf" | "markdown" | "notebook" | "script" | "project";
 
 export function reportIssues(report: NotebookReport) {
   const code = report.cells.filter(cell => cell.type === "code");

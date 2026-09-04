@@ -1,15 +1,53 @@
 import { describe, expect, it } from "vitest";
 import { directives, executableSource, expandMixedMarkdown, parseNotebook, serializeNotebook, type NotebookCell } from "../src/notebook/format";
-import { manifestLessonEntries, validateManifest } from "../src/content/manifest";
-import { filterRegistry, searchRegistry, validateRegisteredDatasetManifest, validateRegistry, type RegistryEntry } from "../src/content/registry";
+import { compileNotebookCode, readExperimentalJavaScriptNotebooks, readNotebookCodeLanguage, readNotebookSourceLanguage, saveExperimentalJavaScriptNotebooks, saveNotebookCodeLanguage, withNotebookCodeLanguage } from "../src/notebook/language";
+import { lessonEntryForDocument, lessonFetchOptions, manifestLessonEntries, validateManifest } from "../src/content/manifest";
+import { lessonUpdateAvailable } from "../src/content/installed";
+import { manifestLessonShareUrl, parseLessonLaunchUrl, registryLessonShareUrl, removeLessonLaunchParams } from "../src/content/lesson-links";
+import { FALLBACK_REGISTRY_URL, filterRegistry, latestRegistryEntry, publicRegistryUrl, registryUrlsForEnvironment, searchRegistry, validateRegisteredDatasetManifest, validateRegistry, type RegistryEntry } from "../src/content/registry";
 import { assertUnambiguousMountPaths, attachmentId, migratePortableWorkspace, validatePortableWorkspace, WORKSPACE_SCHEMA_URL, type WorkspaceAttachment } from "../src/workspace/format";
 
 describe("BioLang notebook format", () => {
+  it("never reuses cached bytes for checksum-verified lesson content", () => {
+    const controller = new AbortController();
+    expect(lessonFetchOptions(controller.signal)).toEqual({
+      credentials: "omit",
+      referrerPolicy: "no-referrer",
+      cache: "no-store",
+      signal: controller.signal,
+    });
+    expect(lessonFetchOptions().cache).toBe("no-store");
+  });
+
+  it("keeps registry refreshes inside the active environment", () => {
+    expect(registryUrlsForEnvironment({ local: true })).toEqual(["/__biolang/registry/v1/index.json"]);
+    expect(registryUrlsForEnvironment({ local: false })).toEqual([
+      "https://registry.lang.bio/v1/index.json",
+      FALLBACK_REGISTRY_URL,
+    ]);
+    expect(registryUrlsForEnvironment({ local: true, configuredUrl: " http://127.0.0.1:4310/v1/index.json " }))
+      .toEqual(["http://127.0.0.1:4310/v1/index.json"]);
+  });
   it("round trips prose and executable fences", () => {
     const source = "# Why\n\n```biolang\nlet x = 4\nx * 2\n```\n\nDone.\n";
     const cells = parseNotebook(source);
     expect(cells.map(cell => cell.type)).toEqual(["markdown", "code", "markdown"]);
     expect(parseNotebook(serializeNotebook(cells)).map(cell => [cell.type, cell.source])).toEqual(cells.map(cell => [cell.type, cell.source]));
+  });
+  it("round trips a readable JavaScript alternative without making it executable BioLang", () => {
+    const source = "```javascript+biolang\nconst result = await bl.mean([1, 2, 3]);\nresult;\n```\n\n```biolang\nmean([1, 2, 3])\n```\n";
+    const cells = parseNotebook(source);
+    expect(cells).toHaveLength(1);
+    expect(cells[0].source).toBe("mean([1, 2, 3])");
+    expect(cells[0].javascriptSource).toContain("await bl.mean");
+    expect(serializeNotebook(cells)).toBe(source);
+  });
+  it("round trips an automatically separated standard JavaScript cell", () => {
+    const source = "```javascript+standard\nconsole.log(Math.sqrt(9));\n```\n\n```biolang\nnil\n```\n";
+    const cells = parseNotebook(source);
+    expect(cells[0].javascriptIndependent).toBe(true);
+    expect(cells[0].javascriptSource).toContain("console.log");
+    expect(serializeNotebook(cells)).toBe(source);
   });
   it("keeps directives out of executable source", () => {
     expect(directives("# @skip\n1 + 1").skip).toBe(true);
@@ -31,7 +69,84 @@ describe("BioLang notebook format", () => {
   });
 });
 
+describe("paired JavaScript lesson view", () => {
+  it("keeps JavaScript notebook controls explicitly experimental", () => {
+    const values = new Map<string, string>();
+    const storage = { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => { values.set(key, value); } };
+    expect(readExperimentalJavaScriptNotebooks(storage)).toBe(false);
+    saveExperimentalJavaScriptNotebooks(true, storage);
+    expect(readExperimentalJavaScriptNotebooks(storage)).toBe(true);
+    saveExperimentalJavaScriptNotebooks(false, storage);
+    expect(readExperimentalJavaScriptNotebooks(storage)).toBe(false);
+  });
+  it("keeps structural JavaScript separate from the canonical kernel source", () => {
+    const source = "let measurements = [12, 14, 15]\nsummary(measurements)";
+    const generated = "let measurements = [12, 14, 15];\nlet result = await bl.summary(measurements);\nresult;";
+    const compiled = compileNotebookCode(source, "javascript", generated);
+    expect(compiled.frontendSource).toContain("bl.summary(measurements)");
+    expect(compiled.frontendSource).not.toContain("bl.define");
+    expect(compiled.frontendSource).not.toContain("`let measurements");
+    expect(compiled.biolangSource).toBe(source);
+  });
+  it("uses URL language overrides and otherwise remembers the reader preference", () => {
+    const values = new Map<string, string>();
+    const storage = { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => { values.set(key, value); } };
+    saveNotebookCodeLanguage("javascript", storage);
+    expect(readNotebookCodeLanguage("https://studio.lang.bio/", storage)).toBe("javascript");
+    expect(readNotebookCodeLanguage("https://studio.lang.bio/?lang=bl", storage)).toBe("biolang");
+    expect(readNotebookCodeLanguage("https://studio.lang.bio/?lang=js", null)).toBe("javascript");
+  });
+  it("persists a notebook-local language marker without exposing it as a cell", () => {
+    const source = withNotebookCodeLanguage("# Analysis\n\n```biolang\nmean(values)\n```\n", "javascript");
+    expect(readNotebookSourceLanguage(source)).toBe("javascript");
+    expect(parseNotebook(source)[0].source).toBe("# Analysis");
+    expect(withNotebookCodeLanguage(source, "biolang").match(/bl:language/g)).toHaveLength(1);
+    expect(readNotebookSourceLanguage("# No marker", "javascript")).toBe("javascript");
+  });
+  it("compiles both frontends to the same canonical kernel source", () => {
+    const source = "let values = [1, 2, 3]\nmean(values)";
+    const biolang = compileNotebookCode(source, "biolang");
+    const javascript = compileNotebookCode(source, "javascript", "await bl.mean(values)");
+    expect(biolang.frontendSource).toBe(source);
+    expect(javascript.frontendSource).toContain("bl.mean");
+    expect(javascript.biolangSource).toBe(biolang.biolangSource);
+  });
+});
+
 describe("content manifests", () => {
+  it("parses exact registry and checksum-pinned direct lesson links without autorun state", () => {
+    expect(parseLessonLaunchUrl("https://studio.lang.bio/?lesson=oriclabs%2Fbdsr-survival-analysis%400.1.0&run=all")).toEqual({
+      kind: "registry", id: "oriclabs/bdsr-survival-analysis", version: "0.1.0"
+    });
+    expect(parseLessonLaunchUrl(`https://studio.lang.bio/?manifest=${encodeURIComponent("https://example.test/lesson.json")}&sha256=${"A".repeat(64)}`)).toEqual({
+      kind: "manifest", manifest: "https://example.test/lesson.json", sha256: "a".repeat(64)
+    });
+    expect(() => parseLessonLaunchUrl("https://studio.lang.bio/?lesson=test/demo@1.0.0&manifest=https://example.test/lesson.json")).toThrow();
+  });
+  it("builds share links without carrying unrelated workspace or run parameters", () => {
+    const registry = registryLessonShareUrl("https://studio.lang.bio/?view=registry&q=old#cell", "oriclabs/demo", "1.2.3");
+    expect(registry).toBe("https://studio.lang.bio/?lesson=oriclabs%2Fdemo%401.2.3");
+    const direct = manifestLessonShareUrl("https://studio.lang.bio/?view=registry", "https://example.test/lesson.json", "b".repeat(64));
+    expect(parseLessonLaunchUrl(direct)).toEqual({ kind: "manifest", manifest: "https://example.test/lesson.json", sha256: "b".repeat(64) });
+    const cleaned = removeLessonLaunchParams(`${direct}&q=keep&run=all`);
+    expect(cleaned).toContain("q=keep");
+    expect(cleaned).not.toContain("manifest=");
+    expect(cleaned).not.toContain("run=");
+  });
+  it("builds a canonical public catalogue handoff with supported filters", () => {
+    expect(publicRegistryUrl({ query: "survival analysis", kind: "lesson", runtime: "browser" }, "oriclabs/demo@1.2.3"))
+      .toBe("https://registry.lang.bio/?q=survival+analysis&kind=lesson&entry=oriclabs%2Fdemo%401.2.3");
+  });
+  it("selects semantic registry versions rather than lexicographic versions", () => {
+    const base = {
+      schema: 1, kind: "lesson", id: "test/demo", name: "demo", title: "Demo", summary: "", publisher: "test", version: "1.0.0",
+      status: "stable", verified: true, manifest: "https://example.test/lesson.json", manifestSha256: "a".repeat(64),
+      publishedAt: "2026-08-30", compatibility: { runtimes: ["browser"] }, categories: ["teaching"], tags: [],
+      sourceRepository: "https://example.test/source", licence: "MIT", validation: "fixture"
+    } as RegistryEntry;
+    expect(latestRegistryEntry([{ ...base, version: "1.9.0" }, { ...base, version: "1.10.0" }], base.id)?.version).toBe("1.10.0");
+    expect(latestRegistryEntry([{ ...base, version: "2.0.0-beta.1" }, { ...base, version: "2.0.0" }], base.id)?.version).toBe("2.0.0");
+  });
   it("accepts an ordered schema-2 lesson collection", () => {
     const manifest = validateManifest({
       schema: 2, id: "biomedical-series", title: "Biomedical series", summary: "A sequence of lessons.",
@@ -44,6 +159,19 @@ describe("content manifests", () => {
       ],
     });
     expect(manifestLessonEntries(manifest).map(lesson => lesson.id)).toEqual(["risk", "trials"]);
+    expect(lessonEntryForDocument(manifest, "trials.bln", 0).id).toBe("trials");
+    expect(lessonEntryForDocument(manifest, "renamed-by-learner.bln", 1).id).toBe("trials");
+  });
+  it("keeps independently installable lessons related through validated series metadata", () => {
+    const manifest = validateManifest({
+      schema: 1, id: "chapter-eight", title: "Statistics", summary: "A chapter companion", entry: "lesson.bln",
+      runtime: "browser", estimatedMemoryMb: 2,
+      source: { title: "Book chapter", url: "https://example.test/chapter", note: "Independent companion" },
+      series: { id: "example-book", title: "Example book", url: "https://example.test/", order: 8, chapter: "Chapter 8 · Statistics" },
+      datasets: [], tags: ["statistics"]
+    });
+    expect(manifest.series?.order).toBe(8);
+    expect(() => validateManifest({ ...manifest, series: { ...manifest.series!, url: "javascript:alert(1)" } })).toThrow();
   });
   it("rejects duplicate or escaping collection entries", () => {
     expect(() => validateManifest({
@@ -74,6 +202,18 @@ describe("content manifests", () => {
   it("rejects registry entries without a pinned manifest checksum", () => {
     expect(() => validateRegistry({ schema: 1, entries: [{ schema: 1, kind: "lesson", id: "test/demo", publisher: "test", name: "demo", manifest: "https://example.test/lesson.json", manifestSha256: "bad" }] })).toThrow();
   });
+  it("detects an installed lesson whose registry checksum or source changed", () => {
+    const registered = {
+      kind: "lesson", name: "demo", manifest: "/lesson.json", manifestSha256: "b".repeat(64)
+    } as RegistryEntry;
+    const installed = {
+      id: "demo", title: "Demo", summary: "", manifest: "http://127.0.0.1:4173/lesson.json",
+      runtime: "browser" as const, tags: [] as string[], manifestSha256: "a".repeat(64)
+    };
+    expect(lessonUpdateAvailable(installed, registered, "http://127.0.0.1:4173/")).toBe(true);
+    expect(lessonUpdateAvailable({ ...installed, manifestSha256: "b".repeat(64) }, registered, "http://127.0.0.1:4173/")).toBe(false);
+    expect(lessonUpdateAvailable({ ...installed, manifest: "/old.json", manifestSha256: "b".repeat(64) }, registered, "http://127.0.0.1:4173/")).toBe(true);
+  });
   it("allows loopback manifests only in an explicitly local registry", () => {
     const entry = {
       schema: 1, kind: "lesson", id: "test/local", publisher: "test", name: "local", title: "Local lesson",
@@ -95,9 +235,23 @@ describe("content manifests", () => {
       dataset: { provider: "test/direct", access: "public", formats: ["mtx"], modalities: ["RNA"], organisms: ["Homo sapiens"], fileCount: 1, totalBytes: 10 }
     } as RegistryEntry;
     expect(searchRegistry([entry], "sapiens mtx", "dataset", "single-cell")).toEqual([entry]);
+    expect(searchRegistry([entry], "test/direct", "dataset")).toEqual([entry]);
     expect(searchRegistry([entry], "mouse", "dataset")).toEqual([]);
     expect(filterRegistry([entry], { runtime: "browser", access: "public", verification: "verified" })).toEqual([entry]);
     expect(filterRegistry([entry], { runtime: "desktop", access: "controlled" })).toEqual([]);
+  });
+  it("searches provider authentication and ranks direct title matches above summary-only matches", () => {
+    const base = {
+      schema: 1, kind: "provider", publisher: "test", version: "1.0.0", status: "stable", verified: true,
+      manifest: "https://example.test/provider.json", manifestSha256: "a".repeat(64), publishedAt: "2026-08-28",
+      compatibility: { runtimes: ["cli"] }, categories: ["data"], tags: [], sourceRepository: "https://example.test/source",
+      licence: "MIT", validation: "registry-verified",
+      provider: { adapter: "http", authentication: "oauth", capabilities: ["download"], apiDocumentation: "https://example.test/api" }
+    } as const;
+    const summaryMatch = { ...base, id: "test/archive", name: "archive", title: "Archive", summary: "A genomic atlas provider" } as unknown as RegistryEntry;
+    const titleMatch = { ...base, id: "test/atlas", name: "atlas", title: "Genomic atlas", summary: "Downloads data" } as unknown as RegistryEntry;
+    expect(searchRegistry([summaryMatch], "oauth http", "provider")).toEqual([summaryMatch]);
+    expect(filterRegistry([summaryMatch, titleMatch], { query: "atlas", sort: "relevance" }).map(entry => entry.id)).toEqual(["test/atlas", "test/archive"]);
   });
   it("rejects traversal in registered dataset files", () => {
     expect(() => validateRegisteredDatasetManifest({
@@ -115,11 +269,17 @@ describe("portable workspaces", () => {
     const digest = "a".repeat(64);
     const workspace = validatePortableWorkspace({
       schema: 3, kind: "biolang-workspace", name: "Teaching", activeNotebookId: "one",
-      notebooks: [{ id: "one", filename: "one.bln", source: "1 + 1\n", attachmentIds: [attachmentId("table.csv", digest)] }],
+      notebooks: [{ id: "one", filename: "one.bln", source: "1 + 1\n", codeLanguage: "javascript", lessonManifestSha256: digest, pinned: true, attachmentIds: [attachmentId("table.csv", digest)] }],
       attachments: [{ id: attachmentId("table.csv", digest), path: "table.csv", size: 12, sha256: digest, mediaType: "text/csv", scope: { kind: "workspace" }, source: { kind: "local" } }]
     });
     expect(workspace.notebooks[0].source).toBe("1 + 1\n");
+    expect(workspace.notebooks[0].lessonManifestSha256).toBe(digest);
+    expect(workspace.notebooks[0].pinned).toBe(true);
+    expect(workspace.notebooks[0].codeLanguage).toBe("javascript");
     expect(JSON.stringify(workspace)).not.toContain("contents");
+    expect(() => validatePortableWorkspace({ ...workspace, notebooks: [{ ...workspace.notebooks[0], lessonManifestSha256: "not-a-digest" }] })).toThrow(/notebook record/);
+    expect(() => validatePortableWorkspace({ ...workspace, notebooks: [{ ...workspace.notebooks[0], pinned: "yes" }] })).toThrow(/notebook record/);
+    expect(() => validatePortableWorkspace({ ...workspace, notebooks: [{ ...workspace.notebooks[0], codeLanguage: "python" }] })).toThrow(/notebook record/);
   });
 
   it("rejects escaping paths and incorrectly scoped data", () => {

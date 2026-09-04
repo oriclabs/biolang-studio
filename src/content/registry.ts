@@ -1,14 +1,25 @@
 import { isAllowedContentUrl, isLoopbackUrl } from "./url-policy";
+import type { LessonSeries } from "./manifest";
 
-const PUBLIC_REGISTRY_URL = "https://registry.lang.bio/v1/index.json";
+export const PUBLIC_REGISTRY_ROOT = "https://registry.lang.bio/";
+const PUBLIC_REGISTRY_URL = `${PUBLIC_REGISTRY_ROOT}v1/index.json`;
 export const FALLBACK_REGISTRY_URL = "https://raw.githubusercontent.com/oriclabs/biolang-registry/main/registry/v1/index.json";
 const configuredRegistryUrl = import.meta.env.VITE_BIOLANG_REGISTRY_URL?.trim();
 const LOCAL_DEVELOPMENT_REGISTRY_URL = "/__biolang/registry/v1/index.json";
-export const DEFAULT_REGISTRY_URL = configuredRegistryUrl || (import.meta.env.DEV ? LOCAL_DEVELOPMENT_REGISTRY_URL : PUBLIC_REGISTRY_URL);
-export const REGISTRY_URLS = [...new Set([DEFAULT_REGISTRY_URL, ...(configuredRegistryUrl ? [PUBLIC_REGISTRY_URL] : []), FALLBACK_REGISTRY_URL])];
+
+export function registryUrlsForEnvironment(options: { configuredUrl?: string; local: boolean }) {
+  const configured = options.configuredUrl?.trim();
+  if (configured) return [configured];
+  return options.local ? [LOCAL_DEVELOPMENT_REGISTRY_URL] : [PUBLIC_REGISTRY_URL, FALLBACK_REGISTRY_URL];
+}
+
+const localStudio = import.meta.env.DEV || (typeof location !== "undefined" && isLoopbackUrl(location.href));
+export const REGISTRY_URLS = registryUrlsForEnvironment({ configuredUrl: configuredRegistryUrl, local: localStudio });
+export const DEFAULT_REGISTRY_URL = REGISTRY_URLS[0];
 
 const CACHE_KEY = "biolang-studio:registry:v1";
 const CACHE_SOURCE_KEY = `${CACHE_KEY}:source`;
+const CACHE_TIME_KEY = `${CACHE_KEY}:checked-at`;
 const KINDS = new Set(["lesson", "package", "workflow", "tool", "dataset", "provider"]);
 const STATUSES = new Set(["preview", "stable", "deprecated", "withdrawn"]);
 const RUNTIMES = new Set(["browser", "desktop", "somer", "cli"]);
@@ -32,6 +43,15 @@ export interface ProviderDiscovery {
   apiDocumentation: string;
 }
 
+export interface LessonDiscoverability {
+  problems: string[];
+  methods: string[];
+  plots: string[];
+  terms: string[];
+  aliases: string[];
+  functions: string[];
+}
+
 export interface RegistryEntry {
   schema: 1;
   kind: RegistryKind;
@@ -49,11 +69,13 @@ export interface RegistryEntry {
   compatibility: { biolang?: string; studio?: string; runtimes: Array<"browser" | "desktop" | "somer" | "cli"> };
   categories: string[];
   tags: string[];
+  discoverability?: LessonDiscoverability;
   sourceRepository: string;
   licence: string;
   validation: string;
   dataset?: DatasetDiscovery;
   provider?: ProviderDiscovery;
+  series?: LessonSeries;
 }
 
 export interface RegisteredDatasetFile {
@@ -92,7 +114,7 @@ export interface RegistryIndex { schema: 1; entries: RegistryEntry[] }
 export type RegistrySource = "local" | "network" | "fallback" | "cache";
 export type RegistryKindFilter = RegistryKind | "all";
 export type RegistryAccessFilter = "all" | "public" | "registration" | "controlled";
-export type RegistryVerificationFilter = "all" | "verified" | "preview";
+export type RegistryVerificationFilter = "all" | "verified" | "unverified";
 export type RegistrySort = "relevance" | "recent" | "name" | "size";
 
 export interface RegistryFilters {
@@ -103,6 +125,40 @@ export interface RegistryFilters {
   access?: RegistryAccessFilter;
   verification?: RegistryVerificationFilter;
   sort?: RegistrySort;
+}
+
+export function publicRegistryUrl(filters: RegistryFilters = {}, selectedKey = "") {
+  const url = new URL(PUBLIC_REGISTRY_ROOT);
+  if (filters.query?.trim()) url.searchParams.set("q", filters.query.trim());
+  if (filters.kind && filters.kind !== "all") url.searchParams.set("kind", filters.kind);
+  if (selectedKey) url.searchParams.set("entry", selectedKey);
+  return url.href;
+}
+
+export function compareRegistryVersions(left: string, right: string) {
+  const parse = (value: string) => {
+    const [base, suffix = ""] = value.split(/-(.*)/s, 2);
+    return { numbers: base.split(".").map(Number), suffix };
+  };
+  const a = parse(left); const b = parse(right);
+  for (let index = 0; index < 3; index += 1) if (a.numbers[index] !== b.numbers[index]) return a.numbers[index] - b.numbers[index];
+  if (!a.suffix && b.suffix) return 1;
+  if (a.suffix && !b.suffix) return -1;
+  return a.suffix.localeCompare(b.suffix, undefined, { numeric: true });
+}
+
+export function latestRegistryEntry(entries: RegistryEntry[], id: string) {
+  return entries.filter(entry => entry.id === id && entry.status !== "withdrawn")
+    .sort((left, right) => compareRegistryVersions(right.version, left.version))[0];
+}
+
+export function registrySearchText(entry: RegistryEntry) {
+  return [entry.id, entry.title, entry.summary, entry.publisher, ...entry.categories, ...entry.tags,
+    ...Object.values(entry.discoverability ?? {}).flat(),
+    entry.dataset?.provider ?? "", ...(entry.dataset?.formats ?? []), ...(entry.dataset?.modalities ?? []), ...(entry.dataset?.organisms ?? []),
+    entry.provider?.adapter ?? "", entry.provider?.authentication ?? "", ...(entry.provider?.capabilities ?? []),
+    entry.series?.id ?? "", entry.series?.title ?? "", entry.series?.chapter ?? ""]
+    .join(" ").toLowerCase();
 }
 
 function validateEntry(value: unknown, allowLoopback = false): RegistryEntry {
@@ -121,7 +177,9 @@ function validateEntry(value: unknown, allowLoopback = false): RegistryEntry {
       !Array.isArray(entry.categories) || !entry.categories.length || !Array.isArray(entry.tags) ||
       !isAllowedContentUrl(entry.sourceRepository) || !entry.licence || !entry.validation ||
       (entry.kind === "dataset" && (!entry.dataset || !entry.dataset.provider || !Number.isSafeInteger(entry.dataset.totalBytes) || entry.dataset.totalBytes < 1)) ||
-      (entry.kind === "provider" && (!entry.provider || !entry.provider.adapter || !isAllowedContentUrl(entry.provider.apiDocumentation)))) {
+      (entry.kind === "provider" && (!entry.provider || !entry.provider.adapter || !isAllowedContentUrl(entry.provider.apiDocumentation))) ||
+      (entry.series && (entry.kind !== "lesson" || !/^[a-z0-9][a-z0-9._-]*$/i.test(entry.series.id) || !entry.series.title ||
+        !isAllowedContentUrl(entry.series.url, allowLoopback) || !Number.isInteger(entry.series.order) || entry.series.order < 0 || !entry.series.chapter))) {
     throw new Error(`Registry entry '${entry.id ?? "unknown"}' is invalid.`);
   }
   return entry as RegistryEntry;
@@ -133,9 +191,7 @@ export function searchRegistry(entries: RegistryEntry[], query = "", kind: Regis
     .filter(entry => kind === "all" || entry.kind === kind)
     .filter(entry => !category || entry.categories.includes(category))
     .filter(entry => {
-      const text = [entry.id, entry.title, entry.summary, entry.publisher, ...entry.categories, ...entry.tags,
-        ...(entry.dataset?.formats ?? []), ...(entry.dataset?.modalities ?? []), ...(entry.dataset?.organisms ?? []),
-        ...(entry.provider?.capabilities ?? [])].join(" ").toLowerCase();
+      const text = registrySearchText(entry);
       return terms.every(term => text.includes(term));
     });
 }
@@ -144,9 +200,25 @@ function searchScore(entry: RegistryEntry, terms: string[]) {
   if (!terms.length) return 0;
   const id = entry.id.toLowerCase();
   const title = entry.title.toLowerCase();
+  const summary = entry.summary.toLowerCase();
+  const categories = entry.categories.join(" ").toLowerCase();
   const tags = entry.tags.join(" ").toLowerCase();
+  const problems = entry.discoverability?.problems.join(" ").toLowerCase() ?? "";
+  const methods = entry.discoverability?.methods.join(" ").toLowerCase() ?? "";
+  const plots = entry.discoverability?.plots.join(" ").toLowerCase() ?? "";
+  const searchableTerms = [
+    ...(entry.discoverability?.terms ?? []), ...(entry.discoverability?.aliases ?? []),
+    ...(entry.discoverability?.functions ?? [])
+  ].join(" ").toLowerCase();
+  const discovery = [entry.dataset?.provider ?? "", ...(entry.dataset?.formats ?? []), ...(entry.dataset?.modalities ?? []), ...(entry.dataset?.organisms ?? []),
+    entry.provider?.adapter ?? "", entry.provider?.authentication ?? "", ...(entry.provider?.capabilities ?? []),
+    entry.series?.id ?? "", entry.series?.title ?? "", entry.series?.chapter ?? ""].join(" ").toLowerCase();
   return terms.reduce((score, term) => score +
-    (title.includes(term) ? 8 : 0) + (id.includes(term) ? 5 : 0) + (tags.includes(term) ? 3 : 0), 0);
+    (title.includes(term) ? 14 : 0) + (problems.includes(term) ? 10 : 0) +
+    (methods.includes(term) ? 9 : 0) + (id.includes(term) ? 8 : 0) +
+    (plots.includes(term) ? 7 : 0) + (tags.includes(term) ? 6 : 0) +
+    (categories.includes(term) ? 5 : 0) + (summary.includes(term) ? 4 : 0) +
+    (searchableTerms.includes(term) ? 3 : 0) + (discovery.includes(term) ? 2 : 0), 0);
 }
 
 export function filterRegistry(entries: RegistryEntry[], filters: RegistryFilters = {}) {
@@ -196,9 +268,9 @@ async function sha256Text(text: string) {
   return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
 }
 
-export async function fetchRegisteredDataset(entry: RegistryEntry): Promise<RegisteredDatasetManifest> {
+export async function fetchRegisteredDataset(entry: RegistryEntry, signal?: AbortSignal): Promise<RegisteredDatasetManifest> {
   if (entry.kind !== "dataset") throw new Error(`Registry entry '${entry.id}' is not a dataset.`);
-  const response = await fetch(entry.manifest, { credentials: "omit", referrerPolicy: "no-referrer", cache: "no-cache" });
+  const response = await fetch(entry.manifest, { credentials: "omit", referrerPolicy: "no-referrer", cache: "no-cache", signal });
   if (!response.ok) throw new Error(`Dataset manifest returned HTTP ${response.status}.`);
   const text = await response.text();
   const actual = await sha256Text(text);
@@ -218,11 +290,11 @@ export function validateRegistry(value: unknown, options: { allowLoopback?: bool
   return { schema: 1, entries };
 }
 
-export async function fetchRegistry(urls: string[] = REGISTRY_URLS): Promise<{ index: RegistryIndex; source: RegistrySource }> {
+export async function fetchRegistry(urls: string[] = REGISTRY_URLS): Promise<{ index: RegistryIndex; source: RegistrySource; checkedAt: string }> {
   let networkError: unknown = new Error("Registry is unavailable.");
-  for (const [index, url] of urls.entries()) {
+  const resolvedUrls = urls.map(url => new URL(url, location.href));
+  for (const resolvedUrl of resolvedUrls) {
     try {
-      const resolvedUrl = new URL(url, location.href);
       if (!isAllowedContentUrl(resolvedUrl.href, isLoopbackUrl(resolvedUrl))) throw new Error("Registry URLs must use HTTPS (HTTP loopback URLs are allowed for local development).");
       const response = await fetch(resolvedUrl, { credentials: "omit", referrerPolicy: "no-referrer", cache: "no-cache" });
       if (!response.ok) throw new Error(`Registry returned HTTP ${response.status}.`);
@@ -231,18 +303,23 @@ export async function fetchRegistry(urls: string[] = REGISTRY_URLS): Promise<{ i
       const registry = validateRegistry(JSON.parse(text), { allowLoopback: local });
       localStorage.setItem(CACHE_KEY, text);
       localStorage.setItem(CACHE_SOURCE_KEY, resolvedUrl.href);
-      return { index: registry, source: local ? "local" : resolvedUrl.href === FALLBACK_REGISTRY_URL ? "fallback" : "network" };
+      const checkedAt = new Date().toISOString();
+      localStorage.setItem(CACHE_TIME_KEY, checkedAt);
+      return { index: registry, source: local ? "local" : resolvedUrl.href === FALLBACK_REGISTRY_URL ? "fallback" : "network", checkedAt };
     } catch (error) { networkError = error; }
   }
   const cached = localStorage.getItem(CACHE_KEY);
   if (cached) {
     try {
       const cachedSource = localStorage.getItem(CACHE_SOURCE_KEY) ?? "";
-      const allowLoopback = isLoopbackUrl(cachedSource) && urls.some(url => isLoopbackUrl(new URL(url, location.href)));
-      return { index: validateRegistry(JSON.parse(cached), { allowLoopback }), source: "cache" };
+      const cachedUrl = new URL(cachedSource, location.href);
+      if (!resolvedUrls.some(url => url.href === cachedUrl.href)) throw new Error("Cached registry belongs to another environment.");
+      const allowLoopback = isLoopbackUrl(cachedUrl);
+      return { index: validateRegistry(JSON.parse(cached), { allowLoopback }), source: "cache", checkedAt: localStorage.getItem(CACHE_TIME_KEY) ?? "" };
     } catch {
       localStorage.removeItem(CACHE_KEY);
       localStorage.removeItem(CACHE_SOURCE_KEY);
+      localStorage.removeItem(CACHE_TIME_KEY);
     }
   }
   throw networkError;

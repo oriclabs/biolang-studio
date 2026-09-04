@@ -1,8 +1,12 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { createHash } from "node:crypto";
 
-const REGISTRY = "https://registry.lang.bio/v1/index.json";
+const REGISTRY = "http://127.0.0.1:4178/__biolang/registry/v1/index.json";
 const REGISTRY_FALLBACK = "https://raw.githubusercontent.com/oriclabs/biolang-registry/main/registry/v1/index.json";
+
+async function enableExperimentalJavaScript(page: Page) {
+  await page.addInitScript(() => localStorage.setItem("biolang-studio:experimental-javascript-notebooks", "true"));
+}
 
 test.beforeEach(async ({ page }) => {
   await page.route(REGISTRY, route => route.fulfill({ json: { schema: 1, entries: [] } }));
@@ -18,6 +22,150 @@ test("automatically dismisses transient notices", async ({ page }) => {
   await expect(notice).toHaveCount(0);
 });
 
+test("switches and remembers the Studio color theme", async ({ page }) => {
+  await page.goto("/");
+  await page.getByLabel("Color theme").selectOption("dark");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  expect(await page.locator("body").evaluate(element => getComputedStyle(element).backgroundColor)).toBe("rgb(8, 13, 24)");
+  expect(await page.locator("article.cell").first().evaluate(element => getComputedStyle(element).backgroundColor)).toBe("rgb(17, 24, 39)");
+  await page.reload();
+  await expect(page.getByLabel("Color theme")).toHaveValue("dark");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+});
+
+test("shows only BioLang notebook controls by default", async ({ page }) => {
+  await page.goto("/?lang=js");
+  await expect(page.getByRole("group", { name: "Notebook code language" })).toHaveCount(0);
+  await expect(page.getByRole("tab", { name: "JavaScript" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /Run all BioLang/ })).toBeVisible();
+});
+
+test("shows every existing lesson cell as paired BioLang and JavaScript", async ({ page, context }) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await enableExperimentalJavaScript(page);
+  await page.goto("/?lang=js");
+  const firstCell = page.locator("article.cell-code").first();
+  await expect(firstCell.getByRole("tab", { name: "JavaScript" })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("group", { name: "Notebook code language" }).getByRole("button", { name: "JavaScript" })).toHaveAttribute("aria-pressed", "true");
+  await expect(firstCell.getByLabel("JavaScript equivalent for cell 2")).toContainText("let measurements = [12, 14, 15");
+  await expect(firstCell.getByLabel("JavaScript equivalent for cell 2")).toContainText("bl.summary(measurements)");
+  await expect(firstCell.getByLabel("JavaScript equivalent for cell 2")).not.toContainText("`let measurements");
+  await firstCell.getByRole("button", { name: /Copy JavaScript code/ }).click();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toContain("bl.summary(measurements)");
+
+  await expect(page.locator(".status")).toHaveText("ready", { timeout: 30_000 });
+  await page.getByRole("button", { name: /Run all JavaScript/ }).click();
+  await expect(page.locator("article.cell-code").nth(1).locator(".result")).toContainText("15", { timeout: 30_000 });
+  await expect(page.getByText(/using JavaScript with BioLang WASM/)).toBeVisible();
+
+  await firstCell.getByRole("tab", { name: "BioLang" }).click();
+  await expect(page.getByRole("group", { name: "Notebook code language" }).getByRole("button", { name: "BioLang" })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator(".codemirror-editor .cm-content").first()).toContainText("let measurements");
+  await page.goto("/");
+  await expect(page.locator("article.cell-code").first().getByRole("tab", { name: "BioLang" })).toHaveAttribute("aria-selected", "true");
+});
+
+test("keeps the selected code language with each notebook tab", async ({ page }) => {
+  await enableExperimentalJavaScript(page);
+  await page.goto("/?lang=bl");
+  await page.getByRole("button", { name: "New", exact: true }).click();
+  const language = page.getByRole("group", { name: "Notebook code language" });
+  await language.getByRole("button", { name: "JavaScript" }).click();
+  await expect(language.getByRole("button", { name: "JavaScript" })).toHaveAttribute("aria-pressed", "true");
+
+  const tabs = page.getByRole("tablist", { name: "Open notebooks" }).getByRole("tab");
+  await tabs.first().click();
+  await expect(language.getByRole("button", { name: "BioLang" })).toHaveAttribute("aria-pressed", "true");
+  await tabs.nth(1).click();
+  await expect(language.getByRole("button", { name: "JavaScript" })).toHaveAttribute("aria-pressed", "true");
+});
+
+test("edits the safe JavaScript frontend and reports unsupported JavaScript live", async ({ page }) => {
+  test.setTimeout(60_000);
+  await enableExperimentalJavaScript(page);
+  await page.goto("/?lang=js");
+  await expect(page.locator(".status")).toHaveText("ready", { timeout: 30_000 });
+  const cell = page.locator("article.cell-code").first();
+  const editor = cell.getByLabel("JavaScript equivalent for cell 2");
+  await expect(editor).toContainText("await bl.summary(measurements)");
+  await editor.fill(`// Direct JavaScript API; BioLang remains the execution engine.\nlet measurements = [1, 2, 3, 4];\nlet mean = await bl.mean(measurements);\nlet median = await bl.median(measurements);\nlet result = { mean: mean, median: median };\nresult;`);
+  await cell.getByRole("tab", { name: "BioLang" }).click();
+  const biolangEditor = cell.getByLabel("BioLang cell 2");
+  await expect(biolangEditor).toContainText("let mean = mean(measurements)", { timeout: 5_000 });
+  await expect(biolangEditor).toContainText("let result = {mean: mean, median: median}");
+  await cell.getByRole("tab", { name: "JavaScript" }).click();
+  await cell.getByRole("button", { name: /Run|Rerun/ }).click();
+  await expect(cell.locator(".result")).toContainText("2.5", { timeout: 30_000 });
+
+  await cell.getByRole("tab", { name: "BioLang" }).click();
+  await biolangEditor.fill("let measurements = [10, 20]\nmean(measurements)");
+  await cell.getByRole("tab", { name: "JavaScript" }).click();
+  await expect(editor).toContainText("await bl.mean(measurements)", { timeout: 5_000 });
+  await cell.getByRole("button", { name: /Run|Rerun/ }).click();
+  await expect(cell.locator(".result")).toContainText("15", { timeout: 30_000 });
+
+  await editor.fill('fetch("https://example.com")');
+  await expect(cell.locator(".cm-lintRange-error")).toBeVisible({ timeout: 5_000 });
+});
+
+test("opens a newly inserted JavaScript cell as an editable direct cell", async ({ page }) => {
+  await enableExperimentalJavaScript(page);
+  await page.goto("/?lang=js");
+  await expect(page.locator(".status")).toHaveText("ready", { timeout: 30_000 });
+  await page.getByRole("button", { name: "+ Code" }).click();
+  const cell = page.locator("article.cell-code").last();
+  const editor = cell.getByLabel(/JavaScript equivalent/);
+  await expect(editor).toContainText("// Direct JavaScript API;");
+  await expect(editor).toContainText("null;");
+  await expect(editor).not.toContainText("bio.program(");
+  await expect(editor).toHaveAttribute("contenteditable", "true");
+  await editor.fill("let value = await bl.mean([2, 4, 6]);\nvalue;");
+  await cell.getByRole("tab", { name: "BioLang" }).click();
+  await expect(cell.getByLabel(/BioLang cell/)).toContainText("let value = mean([2, 4, 6])", { timeout: 5_000 });
+});
+
+test("runs ordinary JavaScript and BioLang package calls in the same JavaScript mode", async ({ page }) => {
+  test.setTimeout(60_000);
+  await enableExperimentalJavaScript(page);
+  await page.goto("/?lang=js");
+  await expect(page.locator(".status")).toHaveText("ready", { timeout: 30_000 });
+  await page.getByRole("button", { name: "New", exact: true }).click();
+  await page.getByRole("button", { name: "+ Code" }).click();
+  await page.getByRole("button", { name: "+ Code" }).click();
+  const cells = page.locator("article.cell-code");
+  await expect(cells).toHaveCount(2);
+
+  await cells.nth(0).getByLabel(/JavaScript equivalent/).fill(`const values = [1, 2, 3, 4].map(value => value * 2);
+function total(items) {
+  let sum = 0;
+  for (const value of items) sum += value;
+  return sum;
+}
+const report = await bl.mean(values);
+console.log("BioLang mean", report.value);
+({ total: total(values), mean: report.value });`);
+  await expect(cells.nth(0).getByText("JavaScript + bl package · BioLang calls use WASM")).toBeVisible({ timeout: 5_000 });
+  await cells.nth(1).getByLabel(/JavaScript equivalent/).fill(`console.log("reused values", values.length);
+Math.max(...values);`);
+  await expect(cells.nth(1).getByText("JavaScript + bl package · BioLang calls use WASM")).toBeVisible({ timeout: 5_000 });
+
+  await cells.nth(1).getByRole("button", { name: /Run cell/ }).click();
+  await expect(cells.nth(0).locator(".result")).toContainText("BioLang mean 5", { timeout: 30_000 });
+  await expect(cells.nth(0).locator(".result").getByRole("button", { name: "Table" })).toHaveAttribute("aria-pressed", "true");
+  await expect(cells.nth(0).locator(".result").getByRole("row", { name: /total 20/ })).toBeVisible();
+  await expect(cells.nth(0).locator(".result").getByRole("row", { name: /mean 5/ })).toBeVisible();
+  await expect(cells.nth(1).locator(".result")).toContainText("reused values 4");
+  await expect(cells.nth(1).locator(".result")).toContainText("8");
+
+  await cells.nth(1).getByLabel(/JavaScript equivalent/).fill('console.log("console returns no result");');
+  await cells.nth(1).getByRole("button", { name: /Run again|Rerun/ }).click();
+  await expect(cells.nth(1).locator("pre.stdout")).toHaveText("console returns no result");
+  await expect(cells.nth(1).locator(".result > pre:not(.stdout)")).toHaveCount(0);
+
+  await cells.nth(0).getByRole("tab", { name: "BioLang" }).click();
+  await expect(cells.nth(0).getByLabel(/BioLang cell/)).toContainText("# BioLang code");
+});
+
 test("creates an editable task-first statistics notebook", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Guided stats" }).click();
@@ -27,8 +175,8 @@ test("creates an editable task-first statistics notebook", async ({ page }) => {
   await page.getByLabel("Columns, in the stated order").fill("baseline,followup");
   await page.getByRole("button", { name: "Create notebook" }).click();
   await expect(page.getByLabel("Notebook name")).toHaveValue("compare-matched-measurements.bln");
-  await expect(page.locator("textarea.code-editor").first()).toContainText('read_csv("patient-measurements.csv")');
-  await expect(page.locator("textarea.code-editor").nth(1)).toContainText('stat.paired_change(data["baseline"], data["followup"], {method: "paired_t"})');
+  await expect(page.locator(".codemirror-editor .cm-content").first()).toContainText('read_csv("patient-measurements.csv")');
+  await expect(page.locator(".codemirror-editor .cm-content").nth(1)).toContainText('stat.paired_change(data["baseline"], data["followup"], {method: "paired_t"})');
 });
 
 test("runs prerequisite cells in the isolated WASM kernel", async ({ page }) => {
@@ -45,11 +193,33 @@ test("runs prerequisite cells in the isolated WASM kernel", async ({ page }) => 
   await expect(page.getByText(/Earlier code cells were run when needed/)).toBeVisible();
   await expect(page.getByText(/2 runnable · all current/)).toBeVisible();
   await expect(page.getByRole("button", { name: "Run again cell 4" })).toBeVisible();
-  const firstCode = page.locator("article.cell-code").first().locator("textarea.code-editor");
-  await firstCode.fill(`${await firstCode.inputValue()} `);
+  const firstCode = page.locator("article.cell-code").first().locator(".cm-content");
+  await firstCode.fill(`${await firstCode.textContent()} `);
   await expect(page.getByRole("button", { name: "Rerun required cell 2" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Rerun required cell 4" })).toBeVisible();
   await expect(page.getByText(/2 runnable · 0 current/)).toBeVisible();
+});
+
+test("supports notebook keyboard execution, copying, indentation, and accessible dialog dismissal", async ({ page, context }) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await page.goto("/");
+  await expect(page.locator(".status")).toHaveText("ready", { timeout: 30_000 });
+  const first = page.locator(".codemirror-editor .cm-content").first();
+  await first.fill("let shortcut_value = 41\nshortcut_value + 1");
+  await first.press("Control+Enter");
+  await expect(page.locator("article.cell-code").first().locator(".result")).toContainText("42", { timeout: 30_000 });
+  await page.locator("article.cell-code").first().getByRole("button", { name: /Copy BioLang code from cell/ }).click();
+  expect((await page.evaluate(() => navigator.clipboard.readText())).replace(/\r\n?/g, "\n")).toBe("let shortcut_value = 41\nshortcut_value + 1");
+  await expect(page.getByText(/Copied BioLang code from cell/)).toBeVisible();
+  await first.press("End");
+  await first.press("Tab");
+  await page.locator("article.cell-code").first().getByRole("button", { name: /Copy BioLang code from cell/ }).click();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toMatch(/ {2}/);
+
+  await page.getByRole("button", { name: "Guided stats" }).click();
+  await expect(page.getByRole("dialog", { name: "New guided statistics notebook" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog", { name: "New guided statistics notebook" })).toHaveCount(0);
 });
 
 test("keeps BioLang operators literal and opens external lesson links separately", async ({ page }) => {
@@ -65,7 +235,7 @@ test("keeps BioLang operators literal and opens external lesson links separately
   await expect(rendered.locator("code")).toHaveText("values |> summary()");
 });
 
-test("exports notebook reports as HTML and Markdown bundles", async ({ page }) => {
+test("exports readable reports and reproducible BioLang handoffs", async ({ page }) => {
   await page.goto("/");
   await expect(page.locator(".status")).toHaveText("ready", { timeout: 30_000 });
   await page.locator("article.cell-code").last().getByRole("button", { name: /Run cell/ }).click();
@@ -89,6 +259,34 @@ test("exports notebook reports as HTML and Markdown bundles", async ({ page }) =
   await page.getByRole("button", { name: "Export Markdown ZIP" }).click();
   const markdownDownload = await markdownEvent;
   expect(markdownDownload.suggestedFilename()).toMatch(/-markdown\.zip$/);
+
+  await page.getByRole("button", { name: "Export", exact: true }).click();
+  await page.getByRole("radio", { name: /Notebook \(\.bln\)/ }).check();
+  const notebookEvent = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Download notebook" }).click();
+  expect((await notebookEvent).suggestedFilename()).toMatch(/\.bln$/);
+
+  await page.getByRole("button", { name: "Export", exact: true }).click();
+  await page.getByRole("radio", { name: /Executable script/ }).check();
+  const scriptEvent = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Download script" }).click();
+  const scriptDownload = await scriptEvent;
+  expect(scriptDownload.suggestedFilename()).toMatch(/\.bl$/);
+  const scriptStream = await scriptDownload.createReadStream(); const scriptChunks: Buffer[] = [];
+  for await (const chunk of scriptStream) scriptChunks.push(Buffer.from(chunk));
+  expect(Buffer.concat(scriptChunks).toString("utf8")).toContain("Generated by BioLang Studio");
+
+  await page.getByRole("button", { name: "Export", exact: true }).click();
+  await page.getByRole("radio", { name: /CLI project/ }).check();
+  const projectEvent = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Download CLI project" }).click();
+  const projectDownload = await projectEvent;
+  expect(projectDownload.suggestedFilename()).toMatch(/-cli\.zip$/);
+  const projectStream = await projectDownload.createReadStream(); const projectChunks: Buffer[] = [];
+  for await (const chunk of projectStream) projectChunks.push(Buffer.from(chunk));
+  const projectArchive = Buffer.concat(projectChunks).toString("utf8");
+  expect(projectArchive).toContain("lesson-data.json");
+  expect(projectArchive).toContain("PROVENANCE.md");
 });
 
 test("renders plots responsively with resize and export actions", async ({ page }) => {
@@ -96,7 +294,7 @@ test("renders plots responsively with resize and export actions", async ({ page 
   await expect(page.locator(".status")).toHaveText("ready", { timeout: 30_000 });
   await page.getByRole("button", { name: "+ Code" }).click();
   const cell = page.locator("article.cell-code").last();
-  await cell.locator("textarea.code-editor").fill('histogram([18, 19, 20, 21, 22, 24, 27, 31], {bins: 4, format: "svg", title: "Responsive BMI"})');
+  await cell.locator(".cm-content").fill('histogram([18, 19, 20, 21, 22, 24, 27, 31], {bins: 4, format: "svg", title: "Responsive BMI"})');
   await cell.getByRole("button", { name: /Run cell/ }).click();
   const plot = cell.locator(".plot-view");
   await expect(plot.locator('iframe[title="BioLang plot"]')).toBeVisible({ timeout: 30_000 });
@@ -108,10 +306,10 @@ test("renders plots responsively with resize and export actions", async ({ page 
   expect(await frame.locator("body").evaluate(body => body.scrollWidth <= body.clientWidth && body.scrollHeight <= body.clientHeight)).toBe(true);
   const svgDownload = page.waitForEvent("download");
   await plot.getByRole("button", { name: "Export SVG" }).click();
-  expect((await svgDownload).suggestedFilename()).toBe("biolang-plot.svg");
+  expect((await svgDownload).suggestedFilename()).toBe("responsive-bmi.svg");
   const pngDownload = page.waitForEvent("download");
   await plot.getByRole("button", { name: "Save PNG" }).click();
-  expect((await pngDownload).suggestedFilename()).toBe("biolang-plot.png");
+  expect((await pngDownload).suggestedFilename()).toBe("responsive-bmi.png");
   await plot.getByRole("button", { name: "Expand" }).click();
   await expect(page.getByRole("dialog", { name: "Expanded plot" })).toBeVisible();
   await page.getByRole("button", { name: "Close expanded plot" }).click();
@@ -124,8 +322,8 @@ test("stops at an inline error and offers retry or delete", async ({ page }) => 
   await page.getByRole("button", { name: "+ Code" }).click();
   await page.getByRole("button", { name: "+ Code" }).click();
   const code = page.locator("article.cell-code");
-  await code.nth(0).locator("textarea.code-editor").fill("does_not_exist()");
-  await code.nth(1).locator("textarea.code-editor").fill("let should_not_run = 42");
+  await code.nth(0).locator(".cm-content").fill("does_not_exist()");
+  await code.nth(1).locator(".cm-content").fill("let should_not_run = 42");
   await code.nth(1).getByRole("button", { name: /Run cell/ }).click();
   await expect(code.nth(0).locator(".result-error")).toHaveAttribute("role", "alert");
   await expect(code.nth(0).getByRole("button", { name: "Retry cell 2" })).toBeVisible();
@@ -152,7 +350,9 @@ test("exports a backend-disclosed, checksum-pinned run record", async ({ page })
   for await (const chunk of stream) chunks.push(Buffer.from(chunk));
   const record = JSON.parse(Buffer.concat(chunks).toString("utf8"));
   expect(record).toMatchObject({ schema: 1, kind: "biolang-studio-run", success: true, runtime: { runtime: "browser" } });
+  expect(record.notebook.sourceLanguage).toBe("biolang");
   expect(record.notebook.sourceSha256).toMatch(/^[0-9a-f]{64}$/);
+  expect(record.notebook.frontendSourceSha256).toMatch(/^[0-9a-f]{64}$/);
   expect(record.notebook.executedSourceSha256).toMatch(/^[0-9a-f]{64}$/);
 });
 
@@ -176,7 +376,7 @@ test("uses native document open, atomic save metadata, recents, and external rel
   await expect(page.locator(".status")).toHaveText("ready", { timeout: 30_000 });
   await page.getByRole("button", { name: "Open", exact: true }).click();
   await expect(page.getByLabel("Notebook name")).toHaveValue("native-analysis.bln");
-  await page.locator("textarea.code-editor").fill("let native_value = 2");
+  await page.locator(".codemirror-editor .cm-content").fill("let native_value = 2");
   await page.getByRole("button", { name: "Save", exact: true }).click();
   await expect(page.getByText("Saved native-analysis.bln atomically.")).toBeVisible();
   const saveRequest = await page.evaluate(() => (window as any).__nativeCalls.find((call: any) => call.command === "studio_save_document").payload.request);
@@ -190,7 +390,7 @@ test("uses native document open, atomic save metadata, recents, and external rel
   await page.evaluate(() => { (window as any).__externalChanged = true; (window as any).__diskSource = "# Reloaded\n\n```biolang\nlet native_value = 3\n```\n"; window.dispatchEvent(new Event("focus")); });
   await expect(page.getByText("Changed outside Studio", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Reload notebook" }).click();
-  await expect(page.locator("textarea.code-editor")).toHaveValue("let native_value = 3");
+  await expect(page.locator(".codemirror-editor .cm-content")).toHaveText("let native_value = 3");
 });
 
 test("cancels native execution and namespaces kernel disposal across notebook tabs", async ({ page }) => {
@@ -212,7 +412,7 @@ test("cancels native execution and namespaces kernel disposal across notebook ta
   page.on("dialog", dialog => void dialog.accept());
   await page.goto("/");
   await expect(page.locator(".status")).toHaveText("ready", { timeout: 30_000 });
-  await page.locator(".kernel-switch select").selectOption("desktop");
+  await page.getByRole("combobox", { name: "Kernel", exact: true }).selectOption("desktop");
   await expect(page.locator(".status")).toHaveText("ready", { timeout: 30_000 });
   await page.locator("article.cell-code").first().getByRole("button", { name: /Run cell/ }).click();
   await expect(page.getByRole("button", { name: "Stop" })).toBeVisible();
@@ -234,7 +434,7 @@ test("inspects variables in bounded pages and exports a small value", async ({ p
   const values = Array.from({ length: 25 }, (_, index) => index + 1).join(", ");
   const longValue = "A".repeat(300);
   const cell = page.locator("article.cell-code").first();
-  await cell.locator("textarea.code-editor").fill(`let many = [${values}]\nlet exact = ["${longValue}"]`);
+  await cell.locator(".cm-content").fill(`let many = [${values}]\nlet exact = ["${longValue}"]`);
   await cell.getByRole("button", { name: /Run cell/ }).click();
 
   await page.locator("details.variables-disclosure > summary").click();
@@ -296,13 +496,13 @@ test("keeps notebook variables isolated while sharing an explicit data attachmen
   await expect(page.locator(".status")).toHaveText("ready", { timeout: 30_000 });
 
   await page.getByRole("button", { name: "+ Code" }).click();
-  await page.locator("textarea.code-editor").last().fill("measurements");
+  await page.locator(".codemirror-editor .cm-content").last().fill("measurements");
   await page.locator("article.cell-code").last().getByRole("button", { name: /Run cell/ }).click();
   await expect(page.locator("article.cell-code").last().locator(".result-error")).toContainText(/measurements|variable/i);
 
   await page.waitForTimeout(1_000);
   await page.reload();
-  await expect(page.getByRole("tab")).toHaveCount(2);
+  await expect(page.getByRole("tablist", { name: "Open notebooks" }).getByRole("tab")).toHaveCount(2);
   await expect(page.locator(".attached-data").filter({ hasText: "shared.csv" })).toContainText("all notebooks");
 });
 
@@ -352,13 +552,13 @@ test("exports, imports, closes, and reopens a multi-notebook workspace", async (
   await page.getByRole("button", { name: "Save", exact: true }).click();
   await saveEvent;
   await page.getByRole("button", { name: "Close second.bln" }).click();
-  await expect(page.getByRole("tab")).toHaveCount(1);
+  await expect(page.getByRole("tablist", { name: "Open notebooks" }).getByRole("tab")).toHaveCount(1);
   await page.getByRole("button", { name: "Reopen closed" }).click();
-  await expect(page.getByRole("tab")).toHaveCount(2);
+  await expect(page.getByRole("tablist", { name: "Open notebooks" }).getByRole("tab")).toHaveCount(2);
 
   await page.locator('input[accept*=".blw"]').setInputFiles({ name: "study.blw", mimeType: "application/json", buffer: workspaceBytes });
   await expect(page.getByLabel("Workspace name")).toHaveValue("Two notebook study");
-  await expect(page.getByRole("tab")).toHaveCount(2);
+  await expect(page.getByRole("tablist", { name: "Open notebooks" }).getByRole("tab")).toHaveCount(2);
 });
 
 test("reviews an independent HTTPS file before downloading and records provenance", async ({ page }) => {
@@ -373,7 +573,7 @@ test("reviews an independent HTTPS file before downloading and records provenanc
   await page.getByRole("button", { name: "From URL…" }).click();
   await page.getByLabel("HTTPS source URL").fill("http://data.example.test/remote.csv");
   await page.getByRole("button", { name: "Review", exact: true }).click();
-  await expect(page.getByRole("alert")).toContainText("must use HTTPS");
+  await expect(page.getByRole("dialog", { name: "Add data from URL" }).getByRole("alert")).toContainText("must use HTTPS");
   expect(requests).toBe(0);
   await page.getByLabel("HTTPS source URL").fill("https://data.example.test/remote.csv");
   await expect(page.getByLabel("Mount path")).toHaveValue("remote.csv");
@@ -415,7 +615,7 @@ test("recovers a valid backup when the primary session is interrupted", async ({
   });
   await page.reload();
   await expect(page.getByText(/Recovered 2 notebooks from the backup session copy/)).toBeVisible();
-  await expect(page.getByRole("tab")).toHaveCount(2);
+  await expect(page.getByRole("tablist", { name: "Open notebooks" }).getByRole("tab")).toHaveCount(2);
 });
 
 test("clears cached data without deleting notebook references", async ({ page }) => {
@@ -450,7 +650,13 @@ test("adds and removes an external lesson package on demand", async ({ page }) =
   await page.getByRole("button", { name: "Add from manifest URL" }).click();
   await page.getByLabel("Manifest URL").fill("https://lessons.example.test/demo/lesson.json");
   await page.getByRole("button", { name: "Add lesson", exact: true }).click();
-  await expect(page.getByRole("button", { name: /External demo/ })).toBeVisible();
+  await expect(page.getByTitle("Open External demo")).toBeVisible();
+  const installedLesson = page.locator(".lesson-row").filter({ hasText: "External demo" });
+  await expect(installedLesson.locator(".lesson-meta")).toHaveText("Local");
+  await expect(installedLesson.locator(".lesson-link")).not.toContainText("Installed only when requested.");
+  await installedLesson.getByRole("button", { name: "About External demo" }).click();
+  await expect(page.getByRole("dialog", { name: "About External demo" })).toContainText("Installed only when requested.");
+  await page.getByRole("dialog", { name: "About External demo" }).getByRole("button", { name: "Close" }).click();
   await expect(page.locator('input[aria-label="Notebook name"]')).toHaveValue("external-demo.bln");
   await expect(page.getByText("Prepare data before running", { exact: true })).toBeVisible();
   await expect(page.locator(".status")).toHaveText("ready", { timeout: 30_000 });
@@ -464,28 +670,56 @@ test("adds and removes an external lesson package on demand", async ({ page }) =
   await expect(page.getByText("No lesson packages installed.")).toBeVisible();
 });
 
-test("opens and removes an ordered lesson collection as notebook tabs", async ({ page }) => {
+test("opens a lesson collection as one tab with stateful selectable sections", async ({ page }) => {
   await page.route("https://lessons.example.test/biomedical/lesson.json", route => route.fulfill({
     json: {
       schema: 2, id: "biomedical-series", title: "Biomedical series", summary: "Two connected lessons.",
       runtime: "browser", estimatedMemoryMb: 2,
       source: { title: "CC BY source", url: "https://lessons.example.test/source", note: "Adapted" },
-      datasets: [], tags: ["statistics"],
+      datasets: [{
+        id: "tiny", title: "Tiny shared data", path: "tiny.csv", url: "https://lessons.example.test/biomedical/tiny.csv",
+        bytes: 12, sha256: "2a2b86e74ffd5e6a9b75e52a105cf9d02920837179f8e8961aa15411d380f7a3",
+        mediaType: "text/csv", source: "Synthetic fixture", citation: "Test only", rights: "Test only"
+      }], tags: ["statistics"],
       lessons: [
         { id: "risk", title: "Risk", summary: "Compare risks.", entry: "01-risk.bln" },
         { id: "trials", title: "Trials", summary: "Plan trials.", entry: "02-trials.bln" },
       ],
     },
   }));
-  await page.route("https://lessons.example.test/biomedical/01-risk.bln", route => route.fulfill({ contentType: "text/plain", body: "# Risk\n\n```biolang\n1 + 1\n```\n" }));
-  await page.route("https://lessons.example.test/biomedical/02-trials.bln", route => route.fulfill({ contentType: "text/plain", body: "# Trials\n\n```biolang\n2 + 2\n```\n" }));
+  await page.route("https://lessons.example.test/biomedical/01-risk.bln", route => route.fulfill({ contentType: "text/plain", body: "# Risk\n\n```biolang\n1 + 1\n```\n\n[Next: Trials](#lesson-section=trials)\n" }));
+  await page.route("https://lessons.example.test/biomedical/02-trials.bln", route => route.fulfill({ contentType: "text/plain", body: "# Trials\n\n[Previous: Risk](#lesson-section=risk)\n\n```biolang\n2 + 2\n```\n" }));
+  await page.route("https://lessons.example.test/biomedical/tiny.csv", route => route.fulfill({ contentType: "text/csv", body: "x,y\n1,2\n3,4\n" }));
   await page.goto("/");
   await page.getByRole("button", { name: "Add from manifest URL" }).click();
   await page.getByLabel("Manifest URL").fill("https://lessons.example.test/biomedical/lesson.json");
   await page.getByRole("button", { name: "Add lesson", exact: true }).click();
-  await expect(page.getByRole("tab", { name: "risk.bln" })).toBeVisible();
-  await expect(page.getByRole("tab", { name: "trials.bln" })).toBeVisible();
-  await expect(page.getByText(/Biomedical series was added as 2 ordered notebook tabs/)).toBeVisible();
+  await expect(page.getByRole("tab", { name: /Biomedical series/ })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "risk.bln" })).toHaveCount(0);
+  await expect(page.getByRole("tab", { name: "trials.bln" })).toHaveCount(0);
+  await expect(page.getByText(/Biomedical series was added as one lesson with 2 selectable sections/)).toBeVisible();
+  const sectionSelector = page.getByLabel("Lesson section", { exact: true });
+  await expect(sectionSelector).toHaveValue("risk");
+  await page.getByRole("button", { name: "Prepare data", exact: true }).click();
+  await expect(page.getByText(/lesson file is prepared and attached/)).toBeVisible();
+  await page.locator("article.cell-code").getByRole("button", { name: /Run cell/ }).click();
+  await expect(page.locator("article.cell-code .result")).toContainText("2");
+  await expect(page.getByRole("button", { name: "Next lesson section" })).toBeEnabled();
+  await page.getByRole("button", { name: "Next lesson section" }).click();
+  await expect(sectionSelector).toHaveValue("trials");
+  await page.getByRole("button", { name: "Previous lesson section" }).click();
+  await expect(sectionSelector).toHaveValue("risk");
+  await page.getByRole("link", { name: "Next: Trials" }).click();
+  await expect(sectionSelector).toHaveValue("trials");
+  await expect(page.getByRole("heading", { name: "Trials" })).toBeVisible();
+  await page.getByRole("link", { name: "Previous: Risk" }).click();
+  await expect(sectionSelector).toHaveValue("risk");
+  await expect(page.locator("article.cell-code .result")).toContainText("2");
+  await sectionSelector.selectOption("trials");
+  await expect(page.getByRole("heading", { name: "Trials" })).toBeVisible();
+  await expect(page.locator("article.cell-code").getByRole("button", { name: /Run cell/ })).toBeEnabled();
+  await sectionSelector.selectOption("risk");
+  await expect(page.locator("article.cell-code .result")).toContainText("2");
   await page.getByTitle("Remove Biomedical series").click();
   await expect(page.getByText("No lesson packages installed.")).toBeVisible();
   await expect(page.getByRole("tab", { name: "risk.bln" })).toBeVisible();
@@ -498,6 +732,7 @@ test("discovers, verifies, runs, and removes a registry lesson", async ({ page }
     schema: 1, id: "registry-demo", title: "Registry demo", summary: "Discovered without being bundled into Studio.",
     entry: "lesson.bln", runtime: "browser", estimatedMemoryMb: 1,
     source: { title: "Test fixture", url: "https://registry-lesson.example.test", note: "Synthetic" },
+    series: { id: "test-methods", title: "Test methods book", url: "https://registry-lesson.example.test/book", order: 4, chapter: "Chapter 4 · Registry lessons" },
     datasets: [{
       id: "tiny", title: "Tiny CSV", path: "tiny.csv", url: "https://registry-lesson.example.test/tiny.csv",
       bytes: 12, sha256: "2a2b86e74ffd5e6a9b75e52a105cf9d02920837179f8e8961aa15411d380f7a3",
@@ -512,7 +747,8 @@ test("discovers, verifies, runs, and removes a registry lesson", async ({ page }
     summary: "Discovered without being bundled into Studio.", publisher: "test", version: "0.1.0",
     status: "preview", verified: false, manifest: "https://registry-lesson.example.test/lesson.json", manifestSha256,
     publishedAt: "2026-08-27", compatibility: { biolang: ">=1.5.0", studio: ">=0.1.0", runtimes: ["browser"] },
-    categories: ["teaching"], tags: ["test"], sourceRepository: "https://github.com/example/registry-demo", licence: "MIT", validation: "fixture"
+    categories: ["teaching"], tags: ["test"], sourceRepository: "https://github.com/example/registry-demo", licence: "MIT", validation: "fixture",
+    series: { id: "test-methods", title: "Test methods book", url: "https://registry-lesson.example.test/book", order: 4, chapter: "Chapter 4 · Registry lessons" }
   }] } }));
   await page.route("https://registry-lesson.example.test/lesson.json", route => route.fulfill({ contentType: "application/json", body: manifestText }));
   await page.route("https://registry-lesson.example.test/lesson.bln", route => route.fulfill({ contentType: "text/plain", body: "# Registry lesson\n\n```biolang\nlet tiny = read_csv(\"tiny.csv\")\nnrow(tiny)\n```\n" }));
@@ -521,19 +757,38 @@ test("discovers, verifies, runs, and removes a registry lesson", async ({ page }
   await page.goto("/");
   await page.getByRole("button", { name: "Registry", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Registry", exact: true })).toBeVisible();
-  await expect(page.getByLabel("Registry entry details").getByRole("heading", { name: "Registry demo" })).toBeVisible();
+  await expect(page.getByText("local registry", { exact: true })).toBeVisible();
+  const registryDetail = page.getByLabel("Registry entry details");
+  await expect(registryDetail.getByRole("heading", { name: "Registry demo" })).toBeVisible();
+  await expect(registryDetail.getByText("Available", { exact: true })).toBeVisible();
+  await page.getByRole("tab", { name: /Lessons/ }).click();
+  const registryCollection = page.locator("details.registry-series").filter({ hasText: "Test methods book" });
+  await expect(registryCollection.getByText("1 lesson", { exact: true })).toBeVisible();
+  await expect(registryCollection.getByText("Chapter 4 · Registry lessons", { exact: true })).toBeVisible();
+  await page.getByRole("tab", { name: /All/ }).click();
   await page.unroute(REGISTRY);
   await page.route(REGISTRY, route => route.abort());
   await page.unroute(REGISTRY_FALLBACK);
   await page.route(REGISTRY_FALLBACK, route => route.abort());
-  await page.reload();
-  await expect(page.getByText("offline cache")).toBeVisible();
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  await expect(page.getByText("offline cache", { exact: true })).toBeVisible();
   await expect(page.getByLabel("Registry entry details").getByRole("heading", { name: "Registry demo" })).toBeVisible();
   await page.getByRole("button", { name: "Install Registry demo" }).click();
   await expect(page.getByText(/checksum-verified and installed/)).toBeVisible();
   await expect(page.locator('input[aria-label="Notebook name"]')).toHaveValue("registry-demo.bln");
-  await page.getByRole("button", { name: "Prepare", exact: true }).click();
-  await expect(page.getByRole("button", { name: "Ready" })).toBeVisible();
+  await expect(page.locator("aside.sidebar details.lesson-series summary").getByText("Test methods book")).toBeVisible();
+  await page.locator("article.cell-code .cm-content").fill('# local note\nlet tiny = read_csv("tiny.csv")\nnrow(tiny)');
+  await page.getByRole("button", { name: "Registry", exact: true }).click();
+  await expect(registryDetail.getByText("Installed", { exact: true })).toBeVisible();
+  await expect(registryDetail.getByText("Open", { exact: true })).toBeVisible();
+  await expect(registryDetail.getByText("Locally modified", { exact: true })).toBeVisible();
+  await registryDetail.getByText("Share…", { exact: true }).click();
+  await expect(registryDetail.getByRole("button", { name: "Copy catalogue link" })).toBeVisible();
+  await expect(registryDetail.getByRole("button", { name: "Copy Studio link" })).toBeVisible();
+  await expect(registryDetail.getByRole("button", { name: "Copy checksum link" })).toBeVisible();
+  await page.getByRole("button", { name: "Notebook", exact: true }).click();
+  await page.getByRole("button", { name: "Prepare data", exact: true }).click();
+  await expect(page.getByText(/lesson file is prepared and attached/)).toBeVisible();
   await page.locator("article.cell-code").getByRole("button", { name: /Run cell/ }).click();
   await expect(page.locator("article.cell-code .result")).toContainText("2");
   await page.getByTitle("Remove Registry demo").click();
@@ -555,8 +810,92 @@ test("rejects a registry lesson when its manifest checksum differs", async ({ pa
   await page.goto("/");
   await page.getByRole("button", { name: "Registry", exact: true }).click();
   await page.getByRole("button", { name: "Install Tampered lesson" }).click();
-  await expect(page.getByText(/failed its registry SHA-256 check/)).toBeVisible();
+  await expect(page.getByText(/failed its shared or registry SHA-256 check/)).toBeVisible();
   await expect(page.getByRole("button", { name: "Install Tampered lesson" })).toBeVisible();
+});
+
+test("offers and verifies an explicit update when an installed lesson checksum changes", async ({ page }) => {
+  const manifestUrl = "https://registry-lesson.example.test/update.json";
+  let manifest = {
+    schema: 1, id: "update-demo", title: "Update demo", summary: "First revision.", entry: "update.bln",
+    runtime: "browser", estimatedMemoryMb: 1,
+    source: { title: "Test fixture", url: "https://registry-lesson.example.test/source", note: "Synthetic" },
+    datasets: [], tags: ["test"]
+  };
+  const registryEntry = () => ({
+    schema: 1, kind: "lesson", id: "test/update-demo", name: "update-demo", title: "Update demo",
+    summary: manifest.summary, publisher: "test", version: "0.1.0", status: "preview", verified: false,
+    manifest: manifestUrl, manifestSha256: createHash("sha256").update(JSON.stringify(manifest)).digest("hex"),
+    publishedAt: "2026-08-30", compatibility: { runtimes: ["browser"] }, categories: ["teaching"], tags: ["test"],
+    sourceRepository: "https://github.com/example/update-demo", licence: "MIT", validation: "fixture"
+  });
+  await page.unroute(REGISTRY);
+  await page.route(REGISTRY, route => route.fulfill({ json: { schema: 1, entries: [registryEntry()] } }));
+  await page.route(manifestUrl, route => route.fulfill({ contentType: "application/json", body: JSON.stringify(manifest) }));
+  await page.route("https://registry-lesson.example.test/update.bln", route => route.fulfill({ contentType: "text/plain", body: "# Update demo\n\n```biolang\n1 + 1\n```\n" }));
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "Registry", exact: true }).click();
+  await page.getByRole("button", { name: "Install Update demo" }).click();
+  await expect(page.getByText(/checksum-verified and installed/)).toBeVisible();
+
+  manifest = { ...manifest, summary: "Second revision." };
+  await page.getByRole("button", { name: "Registry", exact: true }).click();
+  await page.getByRole("button", { name: "Refresh registry" }).click();
+  await expect(page.getByText("Update available").first()).toBeVisible();
+  await page.getByRole("button", { name: "Update Update demo" }).click();
+  await expect(page.getByRole("dialog", { name: "Update Update demo" })).toBeVisible();
+  await expect(page.getByText("Your work is kept")).toBeVisible();
+  await page.getByRole("button", { name: "Update lesson" }).click();
+  await expect(page.getByText(/new registry checksum was verified/)).toBeVisible();
+  await page.getByRole("button", { name: "Registry", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Open Update demo", exact: true })).toBeVisible();
+  await expect(page.getByText("Update available")).toHaveCount(0);
+});
+
+test("reviews an exact lesson link before explicitly installing, preparing, and running all", async ({ page }) => {
+  const manifest = {
+    schema: 1, id: "shared-run", title: "Shared run lesson", summary: "A safe one-click lesson fixture.",
+    entry: "shared-run.bln", runtime: "browser", estimatedMemoryMb: 2,
+    source: { title: "Test fixture", url: "https://shared-lesson.example.test/source", note: "Synthetic" },
+    datasets: [{
+      id: "tiny", title: "Tiny CSV", path: "tiny.csv", url: "https://shared-lesson.example.test/tiny.csv",
+      bytes: 12, sha256: "2a2b86e74ffd5e6a9b75e52a105cf9d02920837179f8e8961aa15411d380f7a3",
+      mediaType: "text/csv", source: "Synthetic fixture", citation: "None", rights: "Test data"
+    }], tags: ["test"]
+  };
+  const manifestText = JSON.stringify(manifest);
+  const manifestSha256 = createHash("sha256").update(manifestText).digest("hex");
+  await page.unroute(REGISTRY);
+  await page.route(REGISTRY, route => route.fulfill({ json: { schema: 1, entries: [{
+    schema: 1, kind: "lesson", id: "test/shared-run", name: "shared-run", title: "Shared run lesson",
+    summary: manifest.summary, publisher: "test", version: "0.1.0", status: "stable", verified: true,
+    manifest: "https://shared-lesson.example.test/lesson.json", manifestSha256, publishedAt: "2026-08-30",
+    compatibility: { runtimes: ["browser"] }, categories: ["teaching"], tags: ["test"],
+    sourceRepository: "https://github.com/example/shared-run", licence: "MIT", validation: "fixture"
+  }] } }));
+  await page.route("https://shared-lesson.example.test/lesson.json", route => route.fulfill({ contentType: "application/json", body: manifestText }));
+  await page.route("https://shared-lesson.example.test/shared-run.bln", route => route.fulfill({ contentType: "text/plain", body: "# Shared run\n\n```biolang\nlet tiny = read_csv(\"tiny.csv\")\nnrow(tiny)\n```\n" }));
+  await page.route("https://shared-lesson.example.test/tiny.csv", route => route.fulfill({ contentType: "text/csv", body: "x,y\n1,2\n3,4\n" }));
+
+  await page.goto("/?lesson=test%2Fshared-run%400.1.0");
+  const review = page.getByRole("dialog", { name: "Review shared lesson" });
+  await expect(review.getByRole("heading", { name: "Shared run lesson" })).toBeVisible();
+  await expect(review.getByText("Registry checksum pinned · publisher verified")).toBeVisible();
+  await expect(page.locator('input[aria-label="Notebook name"]')).not.toHaveValue("shared-run.bln");
+  await review.getByRole("button", { name: "Install, prepare & run all" }).click();
+
+  await expect(page).not.toHaveURL(/lesson=/);
+  await expect(page.locator('input[aria-label="Notebook name"]')).toHaveValue("shared-run.bln");
+  await expect(page.getByRole("button", { name: "Ready" })).toBeVisible({ timeout: 30_000 });
+  await expect(page.locator("article.cell-code .result")).toContainText("2", { timeout: 30_000 });
+
+  await page.goto("/?lesson=test%2Fshared-run%400.1.0");
+  const reopenedReview = page.getByRole("dialog", { name: "Review shared lesson" });
+  await expect(reopenedReview.getByRole("heading", { name: "Shared run lesson" })).toBeVisible();
+  await reopenedReview.getByRole("button", { name: "Install and open" }).click();
+  await expect(page).not.toHaveURL(/lesson=/);
+  await expect(page.getByRole("tab", { name: "shared-run.bln" })).toHaveCount(1);
 });
 
 test("searches and prepares a registered dataset on demand", async ({ page }) => {

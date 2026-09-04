@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { createReadStream, existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import type { ServerResponse } from "node:http";
 import { extname, isAbsolute, relative, resolve, sep } from "node:path";
-import type { Plugin } from "vite";
+import type { Plugin, PreviewServer, ViteDevServer } from "vite";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
@@ -34,47 +34,70 @@ function sendFile(path: string, response: ServerResponse) {
   createReadStream(path).pipe(response);
 }
 
+function localLessonManifest(path: string, lessonsRoot: string) {
+  const manifest = JSON.parse(readFileSync(path, "utf8")) as {
+    datasets?: Array<{ url?: string }>;
+  };
+  for (const dataset of manifest.datasets ?? []) {
+    if (!dataset.url?.startsWith(LESSON_RAW_PREFIX)) continue;
+    const datasetPath = dataset.url.slice(LESSON_RAW_PREFIX.length);
+    if (!fileFor(lessonsRoot, datasetPath)) continue;
+    dataset.url = `/__biolang/lessons/${datasetPath}`;
+  }
+  return `${JSON.stringify(manifest, null, 2)}\n`;
+}
+
 function localContentPlugin(): Plugin {
   const configuredRegistryRoot = resolve(process.env.BIOLANG_LOCAL_REGISTRY_DIR || "../biolang-registry/registry");
   const configuredLessonsRoot = resolve(process.env.BIOLANG_LOCAL_LESSONS_DIR || "../biolang-lessons");
+  function mount(server: ViteDevServer | PreviewServer) {
+    if (!existsSync(configuredRegistryRoot) || !existsSync(configuredLessonsRoot)) return;
+    const registryRoot = realpathSync(configuredRegistryRoot);
+    const lessonsRoot = realpathSync(configuredLessonsRoot);
+    server.middlewares.use("/__biolang/registry", (request, response, next) => {
+      const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
+      const file = fileFor(registryRoot, pathname);
+      if (!file) { next(); return; }
+      if (pathname === "/v1/index.json") {
+        const registry = JSON.parse(readFileSync(file, "utf8")) as { entries?: Array<{ kind?: string; manifest?: string; manifestSha256?: string }> };
+        for (const entry of registry.entries ?? []) {
+          if (entry.kind !== "lesson" || !entry.manifest?.startsWith(LESSON_RAW_PREFIX)) continue;
+          const lessonPath = entry.manifest.slice(LESSON_RAW_PREFIX.length);
+          const localManifest = fileFor(lessonsRoot, lessonPath);
+          if (!localManifest) continue;
+          const bytes = localLessonManifest(localManifest, lessonsRoot);
+          entry.manifest = `/__biolang/lessons/${lessonPath}`;
+          entry.manifestSha256 = createHash("sha256").update(bytes).digest("hex");
+        }
+        response.statusCode = 200;
+        response.setHeader("Content-Type", "application/json; charset=utf-8");
+        response.setHeader("Cache-Control", "no-store");
+        response.setHeader("X-Content-Type-Options", "nosniff");
+        response.end(`${JSON.stringify(registry, null, 2)}\n`);
+        return;
+      }
+      sendFile(file, response);
+    });
+    server.middlewares.use("/__biolang/lessons", (request, response, next) => {
+      const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
+      const file = fileFor(lessonsRoot, pathname);
+      if (!file) { next(); return; }
+      if (pathname.endsWith("/lesson.json")) {
+        response.statusCode = 200;
+        response.setHeader("Content-Type", "application/json; charset=utf-8");
+        response.setHeader("Cache-Control", "no-store");
+        response.setHeader("X-Content-Type-Options", "nosniff");
+        response.end(localLessonManifest(file, lessonsRoot));
+        return;
+      }
+      sendFile(file, response);
+    });
+  }
   return {
     name: "biolang-local-content",
     apply: "serve",
-    configureServer(server) {
-      if (!existsSync(configuredRegistryRoot) || !existsSync(configuredLessonsRoot)) return;
-      const registryRoot = realpathSync(configuredRegistryRoot);
-      const lessonsRoot = realpathSync(configuredLessonsRoot);
-      server.middlewares.use("/__biolang/registry", (request, response, next) => {
-        const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
-        const file = fileFor(registryRoot, pathname);
-        if (!file) { next(); return; }
-        if (pathname === "/v1/index.json") {
-          const registry = JSON.parse(readFileSync(file, "utf8")) as { entries?: Array<{ kind?: string; manifest?: string; manifestSha256?: string }> };
-          for (const entry of registry.entries ?? []) {
-            if (entry.kind !== "lesson" || !entry.manifest?.startsWith(LESSON_RAW_PREFIX)) continue;
-            const lessonPath = entry.manifest.slice(LESSON_RAW_PREFIX.length);
-            const localManifest = fileFor(lessonsRoot, lessonPath);
-            if (!localManifest) continue;
-            const bytes = readFileSync(localManifest);
-            entry.manifest = `/__biolang/lessons/${lessonPath}`;
-            entry.manifestSha256 = createHash("sha256").update(bytes).digest("hex");
-          }
-          response.statusCode = 200;
-          response.setHeader("Content-Type", "application/json; charset=utf-8");
-          response.setHeader("Cache-Control", "no-store");
-          response.setHeader("X-Content-Type-Options", "nosniff");
-          response.end(`${JSON.stringify(registry, null, 2)}\n`);
-          return;
-        }
-        sendFile(file, response);
-      });
-      server.middlewares.use("/__biolang/lessons", (request, response, next) => {
-        const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
-        const file = fileFor(lessonsRoot, pathname);
-        if (!file) { next(); return; }
-        sendFile(file, response);
-      });
-    },
+    configureServer: mount,
+    configurePreviewServer: mount,
   };
 }
 

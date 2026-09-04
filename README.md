@@ -1,6 +1,6 @@
 # BioLang Studio
 
-Live application: <https://oriclabs.com/biolang-studio/>
+Live application: <https://studio.lang.bio/>
 
 BioLang Studio is a focused notebook application for learning and reproducible analysis. It runs ordinary BioLang in a browser Worker, can use a native desktop bridge for large local files, and can submit advanced work to the existing SOMER v1 API.
 
@@ -8,9 +8,9 @@ It is deliberately separate from `bl.exe`: the CLI stays small and scriptable, w
 
 ## Current capabilities
 
-- live `.bln` editing with markdown and BioLang cells, plus optional collapsible lesson steps;
+- live `.bln` editing with markdown and BioLang cells, paired JavaScript embedding tabs, plus optional collapsible lesson steps;
 - a schema-driven **Guided stats** notebook creator that starts from the scientific question, requires named input columns, and writes the selected method into editable BioLang;
-- multiple notebook tabs with isolated variables, one active kernel, close/reopen, and local session restoration;
+- multiple notebook tabs with isolated variables, plus compact one-tab navigation for multi-section lesson collections;
 - persistent browser interpreter with automatic prerequisite execution;
 - BioLang WASM off the UI thread;
 - tables, text, and sandboxed SVG plots as typed outputs;
@@ -22,7 +22,9 @@ It is deliberately separate from `bl.exe`: the CLI stays small and scriptable, w
 - native `.bln` and `.blw` Open, Save and Save As dialogs with same-directory atomic replacement, recent-file shortcuts, external-change detection, and overwrite protection;
 - a full registry workspace with shareable searches, content/runtime/category/access/trust filters, provenance and file details, and runtime-aware actions;
 - registry-discovered lessons, datasets, and provider metadata, with client-side search and on-demand verified preparation;
+- exact-version lesson sharing links with a mandatory review screen and an explicit **Install, prepare & run all** action;
 - custom lesson packages that users can add and remove without rebuilding Studio.
+- compact, independently scrollable lesson and data lists; installed lessons show title and version in one line, with descriptions and metadata in an explicit details dialog;
 - portable `.blw` workspace import/export containing notebook text and data references, never embedded raw data or interpreter variables.
 - recoverable, checksum-wrapped session autosaves with verified temporary and backup copies;
 - local storage usage, quota warnings, persistence requests, and cache clearing that preserves notebooks and data references;
@@ -91,23 +93,61 @@ Studio ships no subject-specific lessons. It discovers metadata from the separat
 
 The public catalogue reads `https://registry.lang.bio/v1/index.json`, falls back to the GitHub-hosted index when the custom domain is unavailable, and then falls back to its last validated browser cache. Catalogue filters and the selected entry are encoded in the page URL so a search can be shared without installing anything.
 
+Registry lesson cards distinguish **Available**, **Installed**, **Open**, **Update available**, and **Locally modified** states. **View full catalogue** opens the public human-facing Registry while **JSON API** exposes the stable client document. Both interfaces use the same content-kind colours, checksum language, publisher-trust labels, exact versions and generated search text.
+
+## Sharing and opening lessons
+
+Registry lesson links pin an exact identity such as
+`?lesson=oriclabs/bdsr-survival-analysis@0.1.0`. Direct manifests use
+`?manifest=https://example.org/lesson.json` and may include `&sha256=...`.
+Studio resolves the link into a review dialog showing trust, runtime, source,
+licence, required files, download size, memory guidance, and the observed
+manifest checksum. A direct manifest without a supplied checksum is visibly
+unverified; Studio pins the bytes observed during review and checks them again
+before installation.
+
+Opening a URL never executes BioLang. The user must choose **Install and open**
+or **Install, prepare & run all**. The latter verifies the manifest again,
+focuses an already-open notebook for the same verified revision or opens a
+separate notebook for changed content so existing edits are not replaced, downloads and
+verifies each declared data file, waits for the selected kernel, and then runs
+the notebook. Lessons requiring Desktop or SOMER can be installed from the
+link, but the run action remains unavailable until a compatible runtime is
+selected. Registry details and installed lesson headers provide **Copy lesson
+link** actions; copied registry links retain the exact published version.
+The Registry share menu separately copies the public catalogue page, the exact
+Studio version link, or a direct manifest link pinned to its SHA-256 checksum.
+
 When `biolang-studio`, `biolang-registry`, and `biolang-lessons` are sibling directories, the Studio development server mounts the latter two automatically. One command starts the UI and its local content endpoints:
 
 ```powershell
 npm run dev
 ```
 
-In development, Studio first reads `/__biolang/registry/v1/index.json` from its own server. The server maps registered `biolang-lessons` manifests to `/__biolang/lessons/`, refreshes their manifest hashes from the working tree, and serves relative `.bln` entries beside each manifest. If the local repositories are unavailable, normal public-registry and GitHub fallbacks still apply. Use `BIOLANG_LOCAL_REGISTRY_DIR` and `BIOLANG_LOCAL_LESSONS_DIR` to override the two server-side directory locations, or `VITE_BIOLANG_REGISTRY_URL` to use another registry endpoint.
+On a loopback development or preview server, Studio reads only `/__biolang/registry/v1/index.json` from that local environment. The server maps registered `biolang-lessons` manifests to `/__biolang/lessons/`, refreshes their manifest hashes from the working tree, and serves relative `.bln` entries beside each manifest. A local refresh never silently falls through to the public registry or reuses a public-registry cache. Deployed Studio reads `https://registry.lang.bio/v1/index.json`, with the GitHub mirror as its same-environment fallback. Use `BIOLANG_LOCAL_REGISTRY_DIR` and `BIOLANG_LOCAL_LESSONS_DIR` to override the two server-side directory locations, or `VITE_BIOLANG_REGISTRY_URL` to make one explicit registry endpoint authoritative.
 
 The **Add lesson package** dialog also accepts `http://localhost` and `http://127.0.0.1` manifests directly. Plain HTTP remains rejected for every non-loopback host, and a public registry cannot direct Studio to a service on the local machine.
 
 Lessons remain ordinary `.bln` documents rather than a Studio-only format. Markdown is parsed into explanation cells and fenced `biolang` blocks are parsed into runnable code cells automatically. Code-block directives such as `# @skip` and `# @hide-output` travel with the notebook.
 
 A schema-1 manifest declares one `entry`. A schema-2 collection declares an
-ordered `lessons` array, and Studio opens every entry as a separate notebook
-tab. The tabs retain the collection attribution and declared datasets.
+ordered `lessons` array. Studio presents the collection as one notebook tab
+with a section selector and previous/next controls, so a long course does not
+crowd the tab strip. Each section retains its own cells, outputs, and execution
+progress when the learner moves between sections. Variables remain isolated;
+the next run reconstructs them by replaying required cells. Declared collection
+data is prepared once and mounted for every section.
+Links written as `#lesson-section=<section-id>` navigate within the same
+collection, allowing lesson authors to put Previous/Next actions directly in
+the notebook while retaining the selector for quick jumps.
 Uninstalling the collection detaches its metadata and cached data but preserves
 edited notebook text as ordinary user documents.
+
+Independently installable chapters related by `series` metadata are grouped as
+one book in the sidebar and sorted by declared chapter order. An open chapter
+offers Previous/Next navigation among installed siblings. Its compact
+**Provenance** panel records source, lesson version, local modification state,
+licence, validation note, manifest and dataset checksums, and the latest run.
 
 Authors can keep a question, its code, and its interpretation together with optional HTML-comment markers. The comments remain harmless in any Markdown reader, while Studio adds **Run step**, collapse, and source-editing controls:
 
@@ -125,7 +165,9 @@ Explain the result.
 <!-- /bl:step -->
 ````
 
-When writing an explanation cell, only explicit fenced `biolang` or `bl` blocks become executable; inline backticks remain prose. The Variables inspector is collapsed by default and shows its current item count, leaving the sidebar focused on lessons and data.
+When writing an explanation cell, only explicit fenced `biolang` or `bl` blocks become executable; inline backticks remain prose. Every code cell has exactly two tabs—**BioLang** and **JavaScript**—synchronized with the notebook-level **Code** selector. There is no separate restricted or advanced JavaScript mode. Studio classifies the source automatically: JavaScript that has an exact BioLang equivalent is synchronized bidirectionally with the BioLang tab, while ordinary JavaScript remains JavaScript-owned and runs in the same browser Worker. Ordinary cells can use functions, loops, `Math`, array methods and captured `console` output alongside the persistent `bl` package, for example `const report = await bl.mean(values)`. A later JavaScript cell can reuse earlier top-level declarations after the notebook is replayed. Syntax and unavailable-capability diagnostics appear before a run; browser DOM globals, direct network APIs and dynamic imports are unavailable in the isolated worker, while explicit BioLang computation continues through WASM. CodeMirror supplies line numbers, parser diagnostics, completion for built-ins and notebook variables, and run shortcuts.
+
+Studio stores synchronized JavaScript in a readable `javascript+biolang` companion fence and automatically separated ordinary JavaScript in `javascript+standard`; both remain one JavaScript mode in the interface. Each companion sits beside a portable BioLang fence understood by the CLI. For a JavaScript-owned cell that fence retains the last equivalent BioLang source instead of pretending that arbitrary JavaScript was translated. JavaScript editing and execution use the Browser kernel; Desktop and SOMER run the canonical BioLang tab, while the standalone JavaScript SDK can submit BioLang programs to SOMER. The selected language is remembered, and `?lang=js` or `?lang=bl` can choose the initial view in a shared link. **Copy** copies the displayed language without running it. Run records disclose the selected frontend and hash both the frontend and what actually executed. The Variables inspector is collapsed by default and shows its current item count, leaving the sidebar focused on lessons and data.
 
 The Variables menu exports the selected value rather than its shortened inspector preview. Browser exports are capped before an extra byte is written beyond the 10 MB result limit; larger values should use `:export variable result.json` (or `.csv`, `.tsv`, or `.txt`) in native BioLang, which serializes incrementally to an atomic temporary file. Sparse matrices default to JSON so an export does not accidentally densify them.
 
@@ -139,7 +181,9 @@ The Data panel is workspace-aware. A local file starts as **this notebook** and 
 
 **Export latest run record** writes a separate `.run.json` provenance artifact after any attempted run. It identifies success or failure, the exact notebook and executed-code hashes, input paths/sizes/SHA-256 values, runtime backend, wall timing, and native version/platform information when the backend exposes it. It deliberately does not store credentials, data bytes, or interpreter values. Its schema is published at [`public/schemas/biolang-studio-run-v1.schema.json`](public/schemas/biolang-studio-run-v1.schema.json).
 
-The notebook toolbar's **Export** action creates a readable snapshot rather than a restorable workspace. HTML is self-contained; PDF uses the browser's native print preview; and the Markdown ZIP contains `report.md`, separate sanitized SVG figures, `run.json`, and a small file manifest. Before export, Studio calls out cells that are unrun, stale, running, failed, missing declared data, or mixed across execution backends. Raw data and credentials are never embedded. Code ligatures are disabled so BioLang operators such as `|>` remain visibly literal, and external HTTP(S) links open in a separate tab.
+The notebook toolbar's **Export** action offers both readable reports and reproducible BioLang handoffs. HTML is self-contained; PDF uses the browser's native print preview; and the Markdown ZIP contains `report.md`, separate sanitized SVG figures, `run.json`, and a small file manifest. A notebook export preserves the editable `.bln`; a script export writes executable code cells in order while omitting explicit `# @skip` cells; and a CLI project ZIP includes both plus `lesson-data.json`, preparation instructions, citations, rights, URLs, byte sizes, and SHA-256 checksums. `bl lesson prepare` performs the explicit verified download and `bl lesson run` prepares then runs from the project directory. Dataset bytes and credentials are never embedded. The lock schema is published at [`public/schemas/lesson-data-lock-v1.schema.json`](public/schemas/lesson-data-lock-v1.schema.json).
+
+Before report export, Studio calls out cells that are unrun, stale, running, failed, missing declared data, or mixed across execution backends. Code ligatures are disabled so BioLang operators such as `|>` remain visibly literal, and external HTTP(S) links open in a separate tab.
 
 The current contract is published at [`public/schemas/biolang-workspace-v3.schema.json`](public/schemas/biolang-workspace-v3.schema.json); v1 and v2 remain published and migrate to v3 on open. Studio rejects newer schemas with an update message and rejects unknown older schemas rather than guessing a migration. Effective mount paths are checked across shared and notebook-only data, so two different files cannot silently appear under the same BioLang path.
 
