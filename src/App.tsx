@@ -34,6 +34,11 @@ type JavaScriptTranslation = { biolangSource: string; javascriptSource?: string;
 type Notice = { tone: "info" | "good" | "bad"; text: string; id?: string } | null;
 const MARKDOWN_COMPONENTS = markdownComponents();
 const INITIAL_NOTICE: NonNullable<Notice> = { id: "welcome", tone: "info", text: "Run any code cell; required earlier cells run automatically." };
+const NOTICE_TIMEOUT_MS: Record<NonNullable<Notice>["tone"], number> = {
+  good: 5_000,
+  info: 8_000,
+  bad: 12_000,
+};
 type WorkspaceView = "notebook" | "registry";
 type DisplayBlock = { key: string; step?: NonNullable<NotebookCell["step"]>; items: Array<{ cell: Cell; index: number }> };
 type RunRecord = {
@@ -331,6 +336,13 @@ export default function App() {
   const [running, setRunning] = useState(false);
   const [notice, setNoticeState] = useState<Notice>(INITIAL_NOTICE);
   const setNotice = useCallback((next: Notice) => setNoticeState(current => current?.tone === "bad" && next?.tone === "info" ? current : next), []);
+  useEffect(() => {
+    if (!notice) return;
+    const timer = window.setTimeout(() => {
+      setNoticeState(current => current === notice ? null : current);
+    }, NOTICE_TIMEOUT_MS[notice.tone]);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
   const [variables, setVariables] = useState<VariableSummary[]>([]);
   const [variableRevision, setVariableRevision] = useState(0);
   const [collapsedSteps, setCollapsedSteps] = useState<Set<string>>(() => new Set());

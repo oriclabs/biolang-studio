@@ -12,26 +12,31 @@ describe.skipIf(!siblingRegistryAvailable)("public Registry and Studio discovery
   const rawIndex = JSON.parse(readFileSync(indexPath, "utf8"));
   const searchIndex = JSON.parse(readFileSync(searchPath, "utf8"));
   const index = validateRegistry(rawIndex);
+  const activeEntries = index.entries.filter(entry => entry.status !== "withdrawn");
 
   it("uses the registry's exact search text and verification state", () => {
     const documents = new Map(searchIndex.documents.map((document: { id: string; version: string }) => [`${document.id}@${document.version}`, document]));
-    for (const entry of index.entries) {
+    for (const entry of activeEntries) {
       const document = documents.get(`${entry.id}@${entry.version}`) as { text: string } | undefined;
       expect(document?.text).toBe(registrySearchText(entry));
       expect(entry.verified).toBe(rawIndex.entries.find((candidate: { id: string; version: string }) => candidate.id === entry.id && candidate.version === entry.version)?.verified);
     }
+    for (const entry of index.entries.filter(entry => entry.status === "withdrawn")) {
+      expect(documents.has(`${entry.id}@${entry.version}`)).toBe(false);
+    }
   });
 
-  it("resolves every exact version and returns it through title search", () => {
+  it("resolves every exact version and returns active entries through title search", () => {
     for (const entry of index.entries) {
       expect(index.entries.find(candidate => candidate.id === entry.id && candidate.version === entry.version)).toEqual(entry);
+      if (entry.status === "withdrawn") continue;
       const distinctive = entry.title.toLowerCase().split(/\s+/).find(word => word.length >= 4);
       if (distinctive) expect(filterRegistry(index.entries, { query: distinctive })).toContainEqual(entry);
     }
   });
 
   it("finds lessons by problems, methods, plots, aliases, and BioLang functions", () => {
-    const lessons = index.entries.filter(entry => entry.kind === "lesson");
+    const lessons = activeEntries.filter(entry => entry.kind === "lesson");
     for (const entry of lessons) {
       const discovery = entry.discoverability;
       expect(discovery).toBeDefined();
