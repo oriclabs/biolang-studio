@@ -116,7 +116,10 @@
   display: flex;
   align-items: center;
   gap: 10px;
+  width: 100%;
+  max-width: 980px;
   min-height: 45px;
+  margin: 0 auto;
   padding: 6px 0 9px;
 }
 .notebook-language {
