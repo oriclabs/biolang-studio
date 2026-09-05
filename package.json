@@ -10,7 +10,7 @@
     "prebuild": "npm run sync:runtime",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host 127.0.0.1",
-    "test": "vitest run --exclude tests/e2e/**",
+    "test": "vitest run --exclude \"tests/e2e/**\"",
     "test:e2e": "node ./node_modules/@playwright/test/cli.js test",
     "test:live": "node scripts/smoke-live.mjs",
     "test:native": "node scripts/native-desktop-smoke.mjs",
